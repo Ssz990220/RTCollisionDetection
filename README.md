@@ -9,4 +9,4 @@ This repository was developed at the Human Centered Robotics Lab (HCRL) of The U
 
 If you found this repository useful, please cite our paper!
 - [1] **Conference Paper:** S Sui, L Sentis, and A Bylard, *Hardware-Accelerated Ray Tracing for Discrete and Continuous Collision Detection on GPUs.* **IEEE International Conference
-on Robotics and Automation (ICRA)** 2025. Available: [https://doi.org/10.1109/TRO.2024.3475047](https://www.arxiv.org/abs/2409.09918)
+on Robotics and Automation (ICRA)** 2025. Available: [https://www.arxiv.org/abs/2409.09918](https://www.arxiv.org/abs/2409.09918)
