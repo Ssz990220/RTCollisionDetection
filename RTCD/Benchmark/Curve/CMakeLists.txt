@@ -1,0 +1,12 @@
+macro(addBenchmark name src scene)
+    add_executable(${name} ${src} ${CU_SRC} ${UTIL_CUDA_SRC} ../../Planner/KNN/knnCUDA.cu)
+    target_link_libraries(${name} benchmark::benchmark CollisionDetector CUDA::nvtx3)
+    set_target_properties(${name} PROPERTIES FOLDER "Benchmark")
+    set_target_properties(${name} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/Benchmarks)
+    target_compile_definitions(${name} PRIVATE ${scene})
+    RTCD_add_source_groups()
+endmacro()
+
+addBenchmark(BM_CURVE_Shelf benchmark.cpp SHELF)
+addBenchmark(BM_CURVE_ShelfSimple benchmark.cpp SHELFSIMPLE)
+addBenchmark(BM_CURVE_DenseShelf benchmark.cpp DENSESHELF)

@@ -1,0 +1,39 @@
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED On)
+set(CMAKE_CXX_EXTENSIONS Off)
+set(CMAKE_CUDA_ARCHITECTURES native)
+set(CMAKE_CUDA_STANDARD 20)
+set(CUDA_HOST_COMPILER ${CMAKE_CXX_COMPILER})
+set(CUDA_NVCC_EXECUTABLE ${CMAKE_CUDA_COMPILER})
+set(CMAKE_CUDA_FLAGS_RELEASE "${CMAKE_CUDA_FLAGS_RELEASE} -lineinfo")
+set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G -g")
+
+
+message(STATUS "CMAKE_CUDA_FLAGS_RELEASE: ${CMAKE_CUDA_FLAGS_RELEASE}")
+message(STATUS "CMAKE_CUDA_FLAGS_DEBUG: ${CMAKE_CUDA_FLAGS_DEBUG}")
+
+if(UNIX)
+  set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+  # Check if CMAKE_BUILD_TYPE is Debug and add -DDEBUG to the compile flags
+  if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+    add_definitions(-DDEBUG)
+    # Add any other debug-specific flags here
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -g")
+  endif()
+endif()
+
+if(MSVC AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /DDEBUG")
+endif()
+
+#if windows
+if(WIN32)
+  if(CMAKE_GENERATOR MATCHES "Visual Studio")
+    set( BUILD_TYPE "$(ConfigurationName)" )
+    set(BIN_DIR "${CMAKE_BINARY_DIR}/bin/${BUILD_TYPE}")
+  else()
+    set(BIN_DIR "${CMAKE_BINARY_DIR}/bin")
+  endif()
+else()
+  set(BIN_DIR "${CMAKE_BINARY_DIR}/bin")
+endif()

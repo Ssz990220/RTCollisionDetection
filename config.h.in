@@ -1,0 +1,7 @@
+#pragma once
+#define STRINGIFY(x)             #x
+#define TO_STRING(x)             STRINGIFY(x)
+#define PROJECT_PTX_DIR          "@PROJECT_PTX_DIR@"
+#define PROJECT_BASE_DIR         "@CMAKE_CURRENT_SOURCE_DIR@"
+#define BIN_DIR                  "@BIN_DIR@"
+#define CONCAT_PATHS(base, path) base path

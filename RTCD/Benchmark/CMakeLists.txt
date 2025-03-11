@@ -1,0 +1,4 @@
+add_subdirectory(Curve)
+add_subdirectory(Discrete)
+
+add_custom_target(AllBenchmarks DEPENDS benchmarkShelf benchmarkShelfSimple benchmarkDenseShelf BM_CURVE_Shelf BM_CURVE_ShelfSimple BM_CURVE_DenseShelf)
