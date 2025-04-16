@@ -1,4 +1,4 @@
-#include <Robot/models/pandas.h>
+#include <Robot/models/panda.h>
 #include <Robot/robot.h>
 #include <Utils/Test/testUtils.h>
 

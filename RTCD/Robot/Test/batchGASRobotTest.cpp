@@ -1,5 +1,5 @@
 #include <Robot/batchGASRobot.h>
-#include <Robot/models/pandas.h>
+#include <Robot/models/panda.h>
 #include <Utils/Test/testUtils.h>
 
 inline constexpr batchRobotConfig batchConfig{2, 16, Dim, BuildType::FAST_TRACE, LinkType::SPHERE_GAS};

@@ -3,7 +3,7 @@
 #include <CollisionScenes/batchScene.h>
 #include <Robot/batchCurveRobot.h>
 #include <Robot/batchRayRobot.h>
-#include <Robot/models/pandas.h>
+#include <Robot/models/panda.h>
 #include <Utils/Test/testUtils.h>
 #include <algorithm>
 #include <benchmark/benchmark.h>

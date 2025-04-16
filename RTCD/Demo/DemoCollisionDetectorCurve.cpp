@@ -9,7 +9,7 @@
 #include <CollisionScenes/Scene/denseShelf.h>
 #include <CollisionScenes/batchScene.h>
 #include <Robot/batchCurveRobot.h>
-#include <Robot/models/pandas.h>
+#include <Robot/models/panda.h>
 #include <Utils/Test/testUtils.h>
 #include <chrono>
 #include <random>

@@ -3,7 +3,7 @@
 // #include <CollisionScenes/Scene/pipeScene.h>
 // #include <CollisionScenes/Scene/curoboTest.h>
 // #include <Robot/models/jaka.h>
-#include <Robot/models/pandas.h>
+#include <Robot/models/panda.h>
 #include <Utils/Test/testUtils.h>
 #include <chrono>
 inline constexpr size_t trajLength = 4096;

@@ -1,5 +1,5 @@
 #include <Robot/batchRayRobot.h>
-#include <Robot/models/pandas.h>
+#include <Robot/models/panda.h>
 #include <Utils/Test/testUtils.h>
 #include <random>
 
