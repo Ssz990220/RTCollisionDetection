@@ -1,12 +1,15 @@
 # RTCollisionDetection
-This package implements mesh-to-mesh and mesh-to-robot-sphere-swept-volume collision detection algorithms using [NVIDIA OptiX](https://developer.nvidia.com/rtx/ray-tracing/optix).
 
-<table align="center">
+RTCollisionDetection implements high-performance mesh-to-mesh and mesh-to-swept-volume collision detection using [NVIDIA OptiX](https://developer.nvidia.com/rtx/ray-tracing/optix). This package supports both discrete and continuous collision detection for robot motion planning, leveraging GPU ray tracing for scalability and accuracy.
+
+<div align="center">
+
+<table>
   <tr>
-    <td><img src="assets/Headline_Disc_blender.png" width="100%" /></td>
-    <td><img src="assets/Headline_Ray_blender.png" width="100%" /></td>
-    <td><img src="assets/Headline_Lin_blender.png" width="100%" /></td>
-    <td><img src="assets/Headline_Quad_blender.png" width="100%" /></td>
+    <td><img src="assets/Headline_Disc_blender.png" /></td>
+    <td><img src="assets/Headline_Ray_blender.png" /></td>
+    <td><img src="assets/Headline_Lin_blender.png" /></td>
+    <td><img src="assets/Headline_Quad_blender.png" /></td>
   </tr>
   <tr>
     <td align="center">(a)</td>
@@ -20,34 +23,43 @@ This package implements mesh-to-mesh and mesh-to-robot-sphere-swept-volume colli
   <em>Ray tracing collision detection methods: discrete-pose collision detection by ray-tracing (a) along obstacle meshes and (b) along robot meshes, and continuous collision detection by ray-tracing against swept sphere-approximated robot volumes (c) piecewise-linear paths or (d) quadratic B-spline paths.</em>
 </p>
 
+</div>
 
-## TODO:
-- [x] Upload the source code.
-- [ ] URDF parser. (How to setup a new robot)
-- [ ] Merge RobotToObs and ObsToRobot (Two-way method)
-- [ ] Upload modified GVDB.
-- [ ] Enable self-collision
-- [ ] Adapt curve representation for Blackwell Architecture
+---
 
-## Features:
-### **Mesh-to-mesh** collision detection with ray-tracing method.
+## ✅ TODO
 
-<table align="center">
+- [x] Upload source code  
+- [x] Add URDF parser  
+- [ ] Merge RobotToObs and ObsToRobot into a two-way method  
+- [ ] Upload modified GVDB  
+- [ ] Enable self-collision detection  
+- [ ] Integrate Blackwell curve representations  
+
+---
+
+## 🔧 Features
+
+### Mesh-to-Mesh Collision Detection
+
+<div align="center">
+
+<table>
   <tr>
-    <td><img src="assets/RTBunny_1.gif" width="100%" /></td>
-    <td><img src="assets/RTBunny_3.gif" width="100%" /></td>
+    <td><img src="assets/RTBunny_1.gif" /></td>
+    <td><img src="assets/RTBunny_3.gif" /></td>
   </tr>
   <tr>
-    <td align="center">ObsToRobot</td>
-    <td align="center">RobotToObs</td>
+    <td align="center">Obstacle → Robot</td>
+    <td align="center">Robot → Obstacle</td>
   </tr>
 </table>
 
-<table align="center">
+<table>
   <tr>
-    <td><img src="assets/DenseShelf_4070.jpg" width="100%" /></td>
-    <td><img src="assets/Shelf_4070.jpg" width="100%" /></td>
-    <td><img src="assets/ShelfSimple_4070.jpg" width="100%" /></td>
+    <td><img src="assets/DenseShelf_4070.jpg" /></td>
+    <td><img src="assets/Shelf_4070.jpg" /></td>
+    <td><img src="assets/ShelfSimple_4070.jpg" /></td>
   </tr>
   <tr>
     <td align="center">Dense Scene</td>
@@ -55,19 +67,24 @@ This package implements mesh-to-mesh and mesh-to-robot-sphere-swept-volume colli
     <td align="center">Simple Scene</td>
   </tr>
 </table>
-<p align="center">
-  <em>Despite performing a much more complex collision check than cuRobo</em> (<b>mesh-to-mesh vs. mesh-to-sphere</b>), <em>our methods outpaced cuRobo by</em> <b>up to 2.8x</b> <em>on medium to dense scenes, scaling past CPU performance at smaller batch sizes.</em>
-</p>
 
-### **Swept-volume of sphere represented robot** collision deteciton with mesh obstacles.
-<p align="center">
-  <img src="assets/CurveGen.gif" width="96%" />
-</p>
-<table align="center">
+*Despite the increased complexity of mesh-to-mesh checks, our methods outperform cuRobo by up to **2.8x** in medium and dense scenes.*
+
+</div>
+
+---
+
+### Mesh-to-Swept-Volume Collision Detection
+
+<div align="center">
+
+<img src="assets/CurveGen.gif" width="96%" />
+
+<table>
   <tr>
-    <td><img src="assets/cur_denseShelf_4070.jpg" width="100%" /></td>
-    <td><img src="assets/cur_shelf_4070.jpg" width="100%" /></td>
-    <td><img src="assets/cur_shelfSimple_4070.jpg" width="100%" /></td>
+    <td><img src="assets/cur_denseShelf_4070.jpg" /></td>
+    <td><img src="assets/cur_shelf_4070.jpg" /></td>
+    <td><img src="assets/cur_shelfSimple_4070.jpg" /></td>
   </tr>
   <tr>
     <td align="center">Dense Scene</td>
@@ -75,117 +92,162 @@ This package implements mesh-to-mesh and mesh-to-robot-sphere-swept-volume colli
     <td align="center">Simple Scene</td>
   </tr>
 </table>
-<p align="center">
-  <em>Our piecewise-linear and discretized methods outpaced cuRobo on all except large batch sizes on simple scenes, with discretization being the fastest on dense scenes at the cost of recall rate. Quadratic B-splines had the best accuracy at slower speeds, but were still faster than cuRobo at most batch sizes for medium/dense scenes.</em>
-</p>
 
-## Setup
-### Hardware
-A RTX GPU is required to run this program.
+*Piecewise-linear and B-spline based swept volumes achieve high accuracy. Our discretized methods are fastest for dense scenes, while B-splines offer superior recall.*
 
-### Install Dependencies
-I used vcpkg to manage most of the dependencies. You can install it from [here](https://vcpkg.io/en/).
-After installing vcpkg, you can install the dependencies by running the following command:
+</div>
+
+---
+
+## 🚀 Setup Instructions
+
+### Hardware Requirements
+
+An **NVIDIA RTX GPU** is required.
+
+### Installing Dependencies
+
+We use [vcpkg](https://vcpkg.io/en/) for dependency management:
+
 ```bash
 vcpkg install eigen3 urdfdom urdfdom-headers lz4 benchmark tbb nlohmann-json FLANN gtest imgui glfw3
 ```
 
-You also need to install CUDAToolKit (>=12.6), which you can download from [here](https://developer.nvidia.com/cuda-downloads).
-OptiX is also required (>=7.7) and can be downloaded from [here](https://developer.nvidia.com/designworks/optix/download).
+Additionally, install:
+- [CUDA Toolkit ≥ 12.6](https://developer.nvidia.com/cuda-downloads)
+- [OptiX ≥ 7.7](https://developer.nvidia.com/designworks/optix/download)
 
-Set up the environment variable for CUDA and configure OptiX_ROOT_DIR.
+Set environment variables:
+- `CUDA_HOME`
+- `OptiX_ROOT_DIR`
 
-### Build
-You can build the project using CMake:
+### Building the Project
+
 ```bash
 mkdir build
 cd build
-cmake .. -DCMAKE_TOOLCHAIN_FILE=$PATH_TO_YOUR_VCPKG$/scripts/buildsystems/vcpkg.cmake
+cmake .. -DCMAKE_TOOLCHAIN_FILE=$PATH_TO_YOUR_VCPKG/scripts/buildsystems/vcpkg.cmake
 ```
 
-## Usage
-This is a demo of the collision checker. You can run it by executing the following commands:
+---
+
+## 🔧 Running Demos
+
 ```bash
 cd build
 cmake --build . --target AllDemos --config Release
-cd ./bin/Demos/Release   # If on Windows
-cd ./bin/Demos           # If on Linux
-# Run any executable here with a name starting with Demo
-./demoQuadContinuous.exe       # For example
+
+# Navigate to the demo binaries
+cd ./bin/Demos/Release   # On Windows
+cd ./bin/Demos           # On Linux
+
+# Run any demo
+./demoQuadContinuous.exe
 ```
-## Setup a new robot
 
-Coming soon. Stay tune!
+---
 
-## Setup a new mesh collision scene
+## 🤖 Add a New Robot
 
-Coming soon. Stay tune!
+See detailed instructions in [How to Add a New Robot](./docs/How-to-New-Robot.md)
 
-## Benchmarks
+---
 
-### Collision Scene
-<p align="center">
-  <img src="assets/collisionScene.png" width="96%" />
-</p>
+## 📦 Add a New Collision Scene
 
-<p align="center">
-  <em>All benchmark is carried out in a scene like this. The simple, medium, and dense versions of the scene consisted of over 15k / 22k, 71k / 107k, and 191k / 321k triangles / edges, respectively.</em>
-</p>
+_(Coming soon — stay tuned!)_
 
-### RTCD Benchmarks
+---
 
-**Make sure you run this before you run the curobo benchmark. The RTCD benchmark will generate the poses used for benchmarking.**
+## 📊 Benchmarking
+
+### Scene Structure
+
+<div align="center">
+
+<img src="assets/collisionScene.png" width="96%" />
+<p><em>Scene complexity (triangles/edges):<br>
+Simple: 15k / 22k &nbsp;&nbsp;|&nbsp;&nbsp; Medium: 71k / 107k &nbsp;&nbsp;|&nbsp;&nbsp; Dense: 191k / 321k</em></p>
+
+</div>
+
+### RTCD Benchmark
 
 ```bash
 cd build
 cmake --build . --target AllBenchmarks --config Release
 cd ..
-./benchmark.bat     # If on Windows
-./benchmark.sh      # If on Linux
+./benchmark.sh    # Linux
+./benchmark.bat   # Windows
 ```
 
-This will take quite amount of time to run all benchmarks.
+> RTCD generates benchmark poses. Run this before benchmarking cuRobo.
 
-### Curobo Benchmarks
-We modified the curobo library to disable self-collision and other constraints in order for a fair comparison. To run the curobo benchmark, first install a customized version of curobo [here](https://github.com/Ssz990220/curobo).
+---
 
-The scripts for curobo benchmarking can be found in `scripts/Benchmark/curobo`.
+### cuRobo Benchmark
 
-### FCL Benchmarks
+We use a modified version of [cuRobo](https://github.com/Ssz990220/curobo) with self-collision and constraints disabled for fair comparison.  
+Scripts are available in `scripts/Benchmark/curobo/`.
 
-We use Moveit Interface for FCL benchmarking. Benchmark setup and source code can be found [here](https://github.com/Ssz990220/rtcc_benchmark).
+---
 
-### Plot the result
-**To plot the result, make sure you run RTCD Benchmarks and Curobo Benchmarks first.**
+### FCL Benchmark
 
-First you need to install julia (>1.10 recommended). And `cd scripts`
+Benchmarks are run through MoveIt’s FCL interface. Source and setup here: [rtcc_benchmark](https://github.com/Ssz990220/rtcc_benchmark).
+
+---
+
+### 📈 Plotting Benchmark Results
+
+Ensure RTCD and cuRobo benchmarks are complete. Then:
+
+```bash
+cd scripts
+```
+
+In Julia (>= 1.10):
+
 ```julia
 using Pkg
-Pkg.activate(.)
-# Hit "]", the terminal should start with `(scripts) pkg>`
-instantiate # This would install all the required packages for plotting and may take a while.
+Pkg.activate(".")
+] instantiate
 ```
-With the above command, you setup the env. Now back to a bash to plot the results.
+
+Back in shell:
+
 ```bash
-julia -O3 ./scripts/Benchmark/plots/discrete/resultAnalysis.jl # For discrete poses benchmark results
-julia -O3 ./scripts/Benchmark/plots/curve/resultAnalysisEff.jl # For continuous benchmark results
+julia -O3 ./scripts/Benchmark/plots/discrete/resultAnalysis.jl   # Discrete results
+julia -O3 ./scripts/Benchmark/plots/curve/resultAnalysisEff.jl   # Continuous results
 ```
 
-The plots will be in `./data/Plots/
+Plots will be saved in `./data/Plots/`.
 
-## Disclaimers
-The code contained herein is of "research grade", meaning it is messy, largely uncommented, insufficently reviewed and optimzied, and intended for reference more than anything else.
-The authors have tried to make it as "user-friendly" as possible. However, the best we can do now is make it compile and run.
+---
 
-Further development is ongoing. For upcoming features and demos, please refer to the TODO list.
+## ⚠️ Disclaimer
 
-## Acknowledgements
-This project is based on the following projects:
-- Official OptiX SDK samples shipped with OptiX
+This is **research-grade software** — expect minimal documentation, limited error handling, and rough edges. While efforts have been made to ensure functionality, the code is best suited for academic reference.
+
+---
+
+## 🙏 Acknowledgements
+
+This project builds on:
+- NVIDIA's official OptiX SDK samples
 - [optix7course](https://github.com/ingowald/optix7course)
 
-## Citing
-This repository was developed at the [Human Centered Robotics Lab (HCRL)](https://sites.utexas.edu/hcrl/) of The University of Texas at Austin in collaboration with Dexterity, Inc. by [Sizhe Sui](https://ssz990220.github.io/), advised by [Prof. Luis Sentis](https://scholar.google.com/citations?user=-3pL5qkAAAAJ&hl=en) and [Andrew Bylard](https://scholar.google.com/citations?user=wKr1q1IAAAAJ&hl=en).
+---
 
-If you found this repository useful, please cite our paper:
-- [1] **Conference Paper:** S Sui, L Sentis, and A Bylard, *Hardware-Accelerated Ray Tracing for Discrete and Continuous Collision Detection on GPUs.* **IEEE International Conference on Robotics and Automation (ICRA)** 2025. Available: [https://www.arxiv.org/abs/2409.09918](https://www.arxiv.org/abs/2409.09918)
+## 📚 Citation
+
+Developed at the [Human Centered Robotics Lab (HCRL)](https://sites.utexas.edu/hcrl/), UT Austin, in collaboration with Dexterity, Inc.
+
+By [Sizhe Sui](https://ssz990220.github.io/), advised by [Prof. Luis Sentis](https://scholar.google.com/citations?user=-3pL5qkAAAAJ) and [Andrew Bylard](https://scholar.google.com/citations?user=wKr1q1IAAAAJ).
+
+If you use this code, please cite:
+
+**[1]** S. Sui, L. Sentis, A. Bylard.  
+*Hardware-Accelerated Ray Tracing for Discrete and Continuous Collision Detection on GPUs.*  
+**IEEE ICRA 2025**  
+[arXiv:2409.09918](https://www.arxiv.org/abs/2409.09918)

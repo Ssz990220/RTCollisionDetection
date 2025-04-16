@@ -76,8 +76,8 @@ if __name__ == '__main__':
 
     ## As a first step, we locate the URDF file and parse it
     parser = argparse.ArgumentParser(description="Process a URDF file to merge fixed joints and generate header file.")
-    parser.add_argument('urdf_file', type=str, nargs='?', default='./models/franka_description/panda.urdf', help='Path to the URDF file')
-    parser.add_argument("--gen_sphere", default=False, help="Generate sphere files")
+    parser.add_argument('--urdf_file', type=str, default='./models/franka_description/panda.urdf', help='Path to the URDF file')
+    parser.add_argument("--gen_sphere", action='store_true', help="Generate sphere files")
     args = parser.parse_args()
 
     urdf_file = args.urdf_file
