@@ -26,6 +26,36 @@ RTCollisionDetection implements high-performance mesh-to-mesh and mesh-to-swept-
 </div>
 
 ---
+## 📚 Table of Contents
+
+- [✅ TODO](#-todo)
+- [🔧 Features](#-features)
+  - [Mesh-to-Mesh Collision Detection](#mesh-to-mesh-collision-detection)
+  - [Mesh-to-Swept-Volume Collision Detection](#mesh-to-swept-volume-collision-detection)
+- [🚀 Setup Instructions](#-setup-instructions)
+  - [Hardware Requirements](#hardware-requirements)
+  - [Installing Dependencies](#installing-dependencies)
+  - [Building the Project](#building-the-project)
+- [🔧 Running Demos](#-running-demos)
+- [🤖 Add a New Robot](./docs/How-to-New-Robot.md)
+  - [Organizing your robot files](./docs/How-to-New-Robot.md#1-organizing-your-robot-files)
+  - [Environment setup](./docs/How-to-New-Robot.md#2-environment-setup)
+  - [Parsing the URDF](./docs/How-to-New-Robot.md#3-parsing-the-urdf)
+  - [Output](./docs/How-to-New-Robot.md#4-output)
+  - [URDF Parser Details](./docs/How-to-New-Robot.md#urdf-parser-details)
+  - [Sphere Representation](./docs/How-to-New-Robot.md#sphere-representation)
+- [📦 Add a New Collision Scene](#-add-a-new-collision-scene)
+- [📊 Benchmarking](./docs/Benchmark.md)
+  - [Scene Structure](./docs/Benchmark.md#scene-structure)
+  - [RTCD Benchmark](./docs/Benchmark.md#rtcd-benchmark)
+  - [cuRobo Benchmark](./docs/Benchmark.md#curobo-benchmark)
+  - [FCL Benchmark](./docs/Benchmark.md#fcl-benchmark)
+  - [Plotting Benchmark Results](./docs/Benchmark.md#-plotting-benchmark-results)
+- [⚠️ Disclaimer](#️-disclaimer)
+- [🙏 Acknowledgements](#acknowledgements)
+- [📚 Citation](#citation)
+
+---
 
 ## ✅ TODO
 
@@ -144,86 +174,6 @@ cd ./bin/Demos           # On Linux
 # Run any demo
 ./demoQuadContinuous.exe
 ```
-
----
-
-## 🤖 Add a New Robot
-
-See detailed instructions in [How to Add a New Robot](./docs/How-to-New-Robot.md)
-
----
-
-## 📦 Add a New Collision Scene
-
-_(Coming soon — stay tuned!)_
-
----
-
-## 📊 Benchmarking
-
-### Scene Structure
-
-<div align="center">
-
-<img src="assets/collisionScene.png" width="96%" />
-<p><em>Scene complexity (triangles/edges):<br>
-Simple: 15k / 22k &nbsp;&nbsp;|&nbsp;&nbsp; Medium: 71k / 107k &nbsp;&nbsp;|&nbsp;&nbsp; Dense: 191k / 321k</em></p>
-
-</div>
-
-### RTCD Benchmark
-
-```bash
-cd build
-cmake --build . --target AllBenchmarks --config Release
-cd ..
-./benchmark.sh    # Linux
-./benchmark.bat   # Windows
-```
-
-> RTCD generates benchmark poses. Run this before benchmarking cuRobo.
-
----
-
-### cuRobo Benchmark
-
-We use a modified version of [cuRobo](https://github.com/Ssz990220/curobo) with self-collision and constraints disabled for fair comparison.  
-Scripts are available in `scripts/Benchmark/curobo/`.
-
----
-
-### FCL Benchmark
-
-Benchmarks are run through MoveIt’s FCL interface. Source and setup here: [rtcc_benchmark](https://github.com/Ssz990220/rtcc_benchmark).
-
----
-
-### 📈 Plotting Benchmark Results
-
-Ensure RTCD and cuRobo benchmarks are complete. Then:
-
-```bash
-cd scripts
-```
-
-In Julia (>= 1.10):
-
-```julia
-using Pkg
-Pkg.activate(".")
-] instantiate
-```
-
-Back in shell:
-
-```bash
-julia -O3 ./scripts/Benchmark/plots/discrete/resultAnalysis.jl   # Discrete results
-julia -O3 ./scripts/Benchmark/plots/curve/resultAnalysisEff.jl   # Continuous results
-```
-
-Plots will be saved in `./data/Plots/`.
-
----
 
 ## ⚠️ Disclaimer
 
