@@ -5,6 +5,16 @@
 #include <Robot/iasRobotKernels.cuh>
 #include <Robot/robot.h>
 #include <Utils/cuda/cudaAlgorithms.cuh>
+#include <cstdlib>
+// Batches with at least this many poses use device stream compaction of the OBB-surviving instances (one D2H count +
+// stream sync per batch, smaller IAS build); smaller batches build over all instances with culled ones masked out
+// (no host round trip). The rule only depends on the host-known nPoses. Set to 0 to always compact, or to a value
+// above BATCHSIZE to never compact. For tuning, the environment variable RTCD_IAS_COMPACT_MIN_POSES (read once, when the
+// robot is constructed) overrides the compiled default.
+#ifndef RTCD_IAS_COMPACT_MIN_POSES
+#define RTCD_IAS_COMPACT_MIN_POSES 256
+#endif
+
 namespace RTCD // Batch Robot Classes Declaration
 {
 
@@ -61,6 +71,13 @@ namespace RTCD // Batch Robot Classes Declaration
         CUdeviceptr indexMapTemplate; // points to memory that contains index map to copy from
         CUDABuffer linkOBBsBuffer; // The link OBBs are transformed version of obbs in linkobbTempalte
         CUDABuffer batchInstancesBuffer; // instances in template order; OBB-culled ones get visibilityMask 0 (V3)
+        CUDABuffer compactInstancesBuffer; // compaction mode: OBB-surviving instances
+        CUDABuffer indexMap; // compaction mode: compacted instance -> pose index map
+        CUDABuffer dCount; // compaction mode: number of surviving instances
+        size_t selectTmpSize = 0; // 0 = CUB temp size not yet queried
+        uint maskCnt         = 0;
+        bool compacted       = false; // whether the last updateWithMask compacted (selects the index map)
+        size_t compactMinPoses = RTCD_IAS_COMPACT_MIN_POSES;
         std::array<OptixInstance, (CFG.DOF + 1) * CFG.BATCHSIZE> instances;
         std::array<std::unique_ptr<optixLink<CFG.BUILD>>, CFG.DOF + 1> batchLinks;
 
@@ -137,8 +154,8 @@ namespace RTCD // Batch Robot Classes Declaration
         constexpr size_t getNOBBs(size_t nPoses) const override { return nPoses * (CFG.DOF + 1); }
 
         inline CUdeviceptr getMapIndex(const size_t idx) const override {
-            // Instances are never compacted, so instance i always belongs to pose i / (DOF + 1): the template map.
-            return batchRobots[idx].indexMapTemplate;
+            // Masked mode: instance i belongs to pose i / (DOF + 1) (the template map); compaction mode: indexMap.
+            return batchRobots[idx].compacted ? batchRobots[idx].indexMap.d_pointer() : batchRobots[idx].indexMapTemplate;
         }
 
         const OptixTraversableHandle getHandle(const size_t idx) const override { return batchRobots[idx].IASHandle; }
@@ -298,7 +315,11 @@ namespace RTCD // StreamUniqueRobot Implementation
         buildOptions.operation             = OPTIX_BUILD_OPERATION_BUILD;
 
         linkTransformsBuffer.alloc(CFG.BATCHSIZE * (CFG.DOF + 1) * 12 * sizeof(float));
-
+        if (const char* env = std::getenv("RTCD_IAS_COMPACT_MIN_POSES")) {
+            compactMinPoses = static_cast<size_t>(std::strtoull(env, nullptr, 10));
+        }
+        indexMap.alloc(CFG.BATCHSIZE * (CFG.DOF + 1) * sizeof(uint));
+        dCount.alloc(sizeof(int));
     }
 
     template <batchRobotConfig CFG>
@@ -341,6 +362,7 @@ namespace RTCD // StreamUniqueRobot Implementation
         }
 
         batchInstancesBuffer.alloc_and_upload(instances);
+        compactInstancesBuffer.alloc_and_upload(instances);
 
         buildInput.type                       = OPTIX_BUILD_INPUT_TYPE_INSTANCES;
         buildInput.instanceArray.instances    = batchInstancesBuffer.d_pointer();
@@ -358,8 +380,11 @@ namespace RTCD // StreamUniqueRobot Implementation
             tempBuffer.sizeInBytes, IASBuffer.d_pointer(), IASBuffer.sizeInBytes, &IASHandle, nullptr, 0));
     }
 
-    // updateWithMask (V3: no stream compaction, no host round trip)
+    // updateWithMask (V3)
     //
+    // Batches with nPoses >= compactMinPoses (RTCD_IAS_COMPACT_MIN_POSES) keep the V2.5 scheme (compact surviving instances on the
+    // device, read the count back, sync, build over the survivors; returns false if none survive).
+    // Smaller batches (masked mode, no stream compaction, no host round trip):
     // The IAS is built over all nPoses * (DOF + 1) instances in their template order (a host-known count), and
     // instances whose link OBB is not in collision with any scene OBB get visibilityMask = 0. The raygen traces with
     // visibility mask 255, so OptiX culls those instances (OptixInstance::visibilityMask: "If rayMask & instanceMask
@@ -374,9 +399,26 @@ namespace RTCD // StreamUniqueRobot Implementation
             return false;
         }
 
-        upInsVisibility(batchInstancesBuffer.d_pointer(), linkTransformsBuffer.d_pointer(), mask, nIns, stream);
-
-        buildInput.instanceArray.numInstances = static_cast<unsigned int>(nIns);
+        if (nPoses >= compactMinPoses) {
+            // Compaction mode (large batches): the smaller IAS build outweighs the host round trip.
+            upInsVisibility(batchInstancesBuffer.d_pointer(), linkTransformsBuffer.d_pointer(), 0, nIns, stream);
+            selectInsIdx(compactInstancesBuffer.d_pointer(), indexMap.d_pointer(), batchInstancesBuffer.d_pointer(),
+                indexMapTemplate, mask, tempBuffer, nIns, selectTmpSize, dCount.d_pointer(), stream,
+                CFG.BATCHSIZE * (CFG.DOF + 1));
+            dCount.downloadAsync(&maskCnt, 1, stream);
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+            compacted = true;
+            if (maskCnt == 0) {
+                return false;
+            }
+            buildInput.instanceArray.instances    = compactInstancesBuffer.d_pointer();
+            buildInput.instanceArray.numInstances = maskCnt;
+        } else {
+            upInsVisibility(batchInstancesBuffer.d_pointer(), linkTransformsBuffer.d_pointer(), mask, nIns, stream);
+            compacted                             = false;
+            buildInput.instanceArray.instances    = batchInstancesBuffer.d_pointer();
+            buildInput.instanceArray.numInstances = static_cast<unsigned int>(nIns);
+        }
         OPTIX_CHECK(optixAccelBuild(context, stream, &buildOptions, &buildInput, 1, tempBuffer.d_pointer(),
             tempBuffer.sizeInBytes, IASBuffer.d_pointer(), IASBuffer.sizeInBytes, &IASHandle, nullptr, 0));
 
