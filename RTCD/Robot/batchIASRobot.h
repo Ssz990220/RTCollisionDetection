@@ -2,8 +2,11 @@
 
 #include <Robot/baseBatchRobot.h>
 #include <Robot/batchRobotConfig.h>
+#include <Robot/iasRobotKernels.cuh>
 #include <Robot/robot.h>
 #include <Utils/cuda/cudaAlgorithms.cuh>
+
+
 namespace RTCD // Batch Robot Classes Declaration
 {
 
@@ -51,7 +54,6 @@ namespace RTCD // Batch Robot Classes Declaration
         CUDABuffer IASBuffer;
         size_t IASBufferSize;
         CUDABuffer tempBuffer;
-        CUDABuffer instancesBuffer;
 
         OptixAccelBuildOptions updateOptions;
 
@@ -60,10 +62,18 @@ namespace RTCD // Batch Robot Classes Declaration
         CUdeviceptr linkobbTemplate; // points to memory that contains DOF + 1 obbs
         CUdeviceptr indexMapTemplate; // points to memory that contains index map to copy from
         CUDABuffer linkOBBsBuffer; // The link OBBs are transformed version of obbs in linkobbTempalte
-        CUDABuffer indexMap; // selected link to pose index map, V2.5.
-        CUDABuffer batchInstancesBuffer; // selected instances might be in collision, V2.5
-
-        CUDABuffer dWhereInDst; // stream compact result, V2.5
+        CUDABuffer batchInstancesBuffer; // instances in template order; OBB-culled ones get visibilityMask 0 (V3)
+        CUDABuffer compactInstancesBuffer; // compaction mode: OBB-surviving instances
+        CUDABuffer indexMap; // compaction mode: compacted instance -> pose index map
+        CUDABuffer dCount; // compaction mode: number of surviving instances
+        size_t selectTmpSize = 0; // 0 = CUB temp size not yet queried
+        uint maskCnt         = 0;
+        bool compacted       = false; // whether the last updateWithMask compacted (selects the index map)
+        // Batches with nPoses >= compactMinPoses stream-compact the OBB-surviving instances (one D2H count + stream
+        // sync per batch, smaller IAS build); smaller batches build over all instances with the culled ones masked out
+        // (no host round trip). The rule depends only on the host-known nPoses. 0 = always compact, a value above
+        // BATCHSIZE = never compact. Default 128: measured crossover on BM_IAS (shelf, RTX 5080).
+        size_t compactMinPoses = 128;
         std::array<OptixInstance, (CFG.DOF + 1) * CFG.BATCHSIZE> instances;
         std::array<std::unique_ptr<optixLink<CFG.BUILD>>, CFG.DOF + 1> batchLinks;
 
@@ -72,10 +82,6 @@ namespace RTCD // Batch Robot Classes Declaration
         bool graphCreated = false;
         cudaGraph_t graph;
         cudaGraphExec_t instance;
-
-        CUDABuffer dCount;
-        size_t selectTmpSize = 0; // 0 = not yet queried (was uninitialized, so the CUB size query could be skipped)
-        uint maskCnt = 0;
 
         streamUniqueRobot() = default;
         streamUniqueRobot(std::shared_ptr<robot<CFG.DOF>> robotPtr, cudaStream_t stream, OptixDeviceContext context);
@@ -96,6 +102,11 @@ namespace RTCD // Batch Robot Classes Declaration
 
         // inline void fkine(const CUdeviceptr posees, const size_t idx);
         inline void fkine(const CUdeviceptr poses, const size_t nPoses);
+
+        // fkineOBB
+        //
+        // @brief fkine + updateOBB in a single kernel launch (same outputs)
+        inline void fkineOBB(const CUdeviceptr poses, const size_t nPoses);
         // updateIAS
         //
         // @brief Update the IAS with the current poses of the robot
@@ -139,12 +150,24 @@ namespace RTCD // Batch Robot Classes Declaration
         constexpr size_t getNOBBs(size_t nPoses) const override { return nPoses * (CFG.DOF + 1); }
 
         inline CUdeviceptr getMapIndex(const size_t idx) const override {
-            return batchRobots[idx].indexMap.d_pointer();
+            // Masked mode: instance i belongs to pose i / (DOF + 1) (the template map); compaction mode: indexMap.
+            return batchRobots[idx].compacted ? batchRobots[idx].indexMap.d_pointer() : batchRobots[idx].indexMapTemplate;
         }
 
         const OptixTraversableHandle getHandle(const size_t idx) const override { return batchRobots[idx].IASHandle; }
 
         void resetGraph() override;
+
+        // setCompactMinPoses
+        //
+        // @brief Batches with at least nPoses poses use stream compaction (one host sync per batch); smaller batches use
+        // the sync-free masked IAS. 0 = always compact; > BATCHSIZE = never compact. Default 128.
+        void setCompactMinPoses(const size_t nPoses) {
+            for (auto& r : batchRobots) {
+                r.compactMinPoses = nPoses;
+            }
+        }
+        size_t getCompactMinPoses() const { return batchRobots[0].compactMinPoses; }
 
 #if defined(_DEBUG) || defined(DEBUG)
         void downloadOBB(std::vector<OBB>& obbs, const size_t idx) {
@@ -245,14 +268,12 @@ namespace RTCD // BatchIASRobot Implementation
 
     template <batchRobotConfig CFG>
     void batchIASRobot<CFG>::fkine(const CUdeviceptr poses, const size_t idx) {
-        batchRobots[idx].fkine(poses, CFG.BATCHSIZE);
-        updateOBBs(idx, CFG.BATCHSIZE);
+        batchRobots[idx].fkineOBB(poses, CFG.BATCHSIZE);
     }
 
     template <batchRobotConfig CFG>
     void batchIASRobot<CFG>::fkine(const CUdeviceptr poses, const size_t idx, const size_t nPoses) {
-        batchRobots[idx].fkine(poses, nPoses);
-        updateOBBs(idx, nPoses);
+        batchRobots[idx].fkineOBB(poses, nPoses);
     }
 
     template <batchRobotConfig CFG>
@@ -301,9 +322,7 @@ namespace RTCD // StreamUniqueRobot Implementation
         buildOptions.operation             = OPTIX_BUILD_OPERATION_BUILD;
 
         linkTransformsBuffer.alloc(CFG.BATCHSIZE * (CFG.DOF + 1) * 12 * sizeof(float));
-
         indexMap.alloc(CFG.BATCHSIZE * (CFG.DOF + 1) * sizeof(uint));
-        dWhereInDst.alloc(roundUpLog2(CFG.BATCHSIZE * (CFG.DOF + 1)) * sizeof(uint));
         dCount.alloc(sizeof(int));
     }
 
@@ -335,13 +354,6 @@ namespace RTCD // StreamUniqueRobot Implementation
             // batchLinks[i]->buildGAS(buildFlags, context, tempBuffer);
         }
 
-        // Allocate enough memory for stream compact
-        tempBuffer.expandIfNotEnough(
-            (((CFG.DOF + 1) * CFG.BATCHSIZE
-                 + ((CFG.DOF + 1) * CFG.BATCHSIZE + 4 * THREADBLOCK_SIZE - 1) / 4 * THREADBLOCK_SIZE)
-                * sizeof(uint)));
-
-
         for (int j = 0; j < CFG.BATCHSIZE; j++) {
             for (int i = 0; i < CFG.DOF + 1; i++) {
                 instances[j * (CFG.DOF + 1) + i]                   = {};
@@ -353,8 +365,8 @@ namespace RTCD // StreamUniqueRobot Implementation
             }
         }
 
-        instancesBuffer.alloc_and_upload(instances);
         batchInstancesBuffer.alloc_and_upload(instances);
+        compactInstancesBuffer.alloc_and_upload(instances);
 
         buildInput.type                       = OPTIX_BUILD_INPUT_TYPE_INSTANCES;
         buildInput.instanceArray.instances    = batchInstancesBuffer.d_pointer();
@@ -372,24 +384,45 @@ namespace RTCD // StreamUniqueRobot Implementation
             tempBuffer.sizeInBytes, IASBuffer.d_pointer(), IASBuffer.sizeInBytes, &IASHandle, nullptr, 0));
     }
 
+    // updateWithMask (V3)
+    //
+    // Batches with nPoses >= compactMinPoses keep the V2.5 scheme (compact surviving instances on the
+    // device, read the count back, sync, build over the survivors; returns false if none survive).
+    // Smaller batches (masked mode, no stream compaction, no host round trip):
+    // The IAS is built over all nPoses * (DOF + 1) instances in their template order (a host-known count), and
+    // instances whose link OBB is not in collision with any scene OBB get visibilityMask = 0. The raygen traces with
+    // visibility mask 255, so OptiX culls those instances (OptixInstance::visibilityMask: "If rayMask & instanceMask
+    // == 0 the instance is culled"), exactly as if they had been compacted away. The instance -> pose map is the
+    // identity template (getMapIndex), so per-pose hit flags are unchanged.
+    // Always returns true for nPoses > 0: when every instance is culled the launch simply reports no hits, which is
+    // what skipping the launch produced before (the hit buffer is zeroed by the caller).
     template <batchRobotConfig CFG>
     inline bool streamUniqueRobot<CFG>::updateWithMask(const CUdeviceptr mask, const size_t nPoses) {
-
-        upInsPoses(instancesBuffer.d_pointer(), linkTransformsBuffer.d_pointer(), nPoses * (CFG.DOF + 1),
-            (CFG.DOF + 1) * CFG.BATCHSIZE, stream);
-
-        selectInsIdx(batchInstancesBuffer.d_pointer(), indexMap.d_pointer(), instancesBuffer.d_pointer(),
-            indexMapTemplate, mask, tempBuffer, nPoses * (CFG.DOF + 1), selectTmpSize, dCount.d_pointer(), stream,
-            CFG.BATCHSIZE * (CFG.DOF + 1));
-        dCount.downloadAsync(&maskCnt, 1, stream);
-        CUDA_CHECK(cudaStreamSynchronize(stream));
-
-        buildInput.instanceArray.numInstances = maskCnt;
-
-        if (buildInput.instanceArray.numInstances == 0) {
+        const size_t nIns = nPoses * (CFG.DOF + 1);
+        if (nIns == 0) {
             return false;
         }
 
+        if (nPoses >= compactMinPoses) {
+            // Compaction mode (large batches): the smaller IAS build outweighs the host round trip.
+            upInsVisibility(batchInstancesBuffer.d_pointer(), linkTransformsBuffer.d_pointer(), 0, nIns, stream);
+            selectInsIdx(compactInstancesBuffer.d_pointer(), indexMap.d_pointer(), batchInstancesBuffer.d_pointer(),
+                indexMapTemplate, mask, tempBuffer, nIns, selectTmpSize, dCount.d_pointer(), stream,
+                CFG.BATCHSIZE * (CFG.DOF + 1));
+            dCount.downloadAsync(&maskCnt, 1, stream);
+            CUDA_CHECK(cudaStreamSynchronize(stream));
+            compacted = true;
+            if (maskCnt == 0) {
+                return false;
+            }
+            buildInput.instanceArray.instances    = compactInstancesBuffer.d_pointer();
+            buildInput.instanceArray.numInstances = maskCnt;
+        } else {
+            upInsVisibility(batchInstancesBuffer.d_pointer(), linkTransformsBuffer.d_pointer(), mask, nIns, stream);
+            compacted                             = false;
+            buildInput.instanceArray.instances    = batchInstancesBuffer.d_pointer();
+            buildInput.instanceArray.numInstances = static_cast<unsigned int>(nIns);
+        }
         OPTIX_CHECK(optixAccelBuild(context, stream, &buildOptions, &buildInput, 1, tempBuffer.d_pointer(),
             tempBuffer.sizeInBytes, IASBuffer.d_pointer(), IASBuffer.sizeInBytes, &IASHandle, nullptr, 0));
 
@@ -399,6 +432,13 @@ namespace RTCD // StreamUniqueRobot Implementation
     template <batchRobotConfig CFG>
     inline void streamUniqueRobot<CFG>::fkine(const CUdeviceptr poses, const size_t nPoses) {
         batchFkineAdj(poses, linkTransformsBuffer.d_pointer(), CFG.DOF, nPoses, stream);
+    }
+
+    template <batchRobotConfig CFG>
+    inline void streamUniqueRobot<CFG>::fkineOBB(const CUdeviceptr poses, const size_t nPoses) {
+        assert(nPoses <= CFG.BATCHSIZE && "The number of poses should be smaller than the batch size");
+        batchFkineAdjOBB(poses, linkTransformsBuffer.d_pointer(), linkobbTemplate, linkOBBsBuffer.d_pointer(), CFG.DOF,
+            nPoses, stream);
     }
 
 

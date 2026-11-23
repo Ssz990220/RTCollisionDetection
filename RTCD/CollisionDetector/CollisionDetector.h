@@ -1091,18 +1091,22 @@ namespace RTCD { // Private functions
         const int streamId        = frameId % NSTREAM;
         perStreamData& streamData = streamDatas[streamId];
 
-        CUDA_CHECK(cudaMemsetAsync(
-            reinterpret_cast<void*>(getRobotMask(streamId)), 0, nRobotOBBs * sizeof(int), streams[streamId]));
-        CUDA_CHECK(cudaMemsetAsync(
-            reinterpret_cast<void*>(getSceneMask(streamId)), 0, nSceneOBBs * sizeof(int), streams[streamId]));
-        CUDA_CHECK(cudaMemsetAsync(
-            reinterpret_cast<void*>(getRSMask(streamId)), 0, nRobotOBBs * nSceneOBBs * sizeof(int), streams[streamId]));
         if constexpr (TYPE == LinkType::RAY_ONLINE) {
+            CUDA_CHECK(cudaMemsetAsync(
+                reinterpret_cast<void*>(getRobotMask(streamId)), 0, nRobotOBBs * sizeof(int), streams[streamId]));
+            CUDA_CHECK(cudaMemsetAsync(
+                reinterpret_cast<void*>(getSceneMask(streamId)), 0, nSceneOBBs * sizeof(int), streams[streamId]));
+            CUDA_CHECK(cudaMemsetAsync(reinterpret_cast<void*>(getRSMask(streamId)), 0,
+                nRobotOBBs * nSceneOBBs * sizeof(int), streams[streamId]));
             BBCD(streamData.robotOBBs, streamData.sceneOBBs, rayRobot->getNOBBs(nPoses), nSceneOBBs,
                 getRobotMask(streamId), getSceneMask(streamId), getRSMask(streamId), streams[streamId]);
         } else {
-            BBCD(streamData.robotOBBs, streamData.sceneOBBs, meshRobot->getNOBBs(nPoses), nSceneOBBs,
-                getRobotMask(streamId), getSceneMask(streamId), getRSMask(streamId), streams[streamId]);
+            // Only the robot mask is consumed on this path (robot->updateWithMask reads its first getNOBBs(nPoses)
+            // entries); the scene and robot x scene masks are never read. BBCDRobotMask writes every one of those
+            // entries with the same per-OBB collision count BBCD would accumulate, so the three memsets are not
+            // needed: 1 kernel launch instead of 3 memsets + 1 launch.
+            BBCDRobotMask(streamData.robotOBBs, streamData.sceneOBBs, meshRobot->getNOBBs(nPoses), nSceneOBBs,
+                getRobotMask(streamId), streams[streamId]);
         }
     }
 } // namespace RTCD
