@@ -495,6 +495,82 @@ void batchOBBTransform2(const CUdeviceptr TransformArray, const CUdeviceptr obbs
 }
 
 
+// Same arithmetic as transformOBB, but the worker index (row of the 3x4 transform) is passed explicitly so the
+// computation can run inside the fkine thread layout. Must stay bit-identical to transformOBB.
+__forceinline__ __device__ void transformOBBRow(
+    const float4* tf, const RTCD::OBB* input, RTCD::OBB* output, const unsigned int workerID) {
+    const float* centerIn       = reinterpret_cast<const float*>(input);
+    const float* orientationXIn = centerIn + 6;
+    const float* orientationYIn = orientationXIn + 3;
+    const float* orientationZIn = orientationYIn + 3;
+
+    float* center       = reinterpret_cast<float*>(output);
+    float* orientationX = center + 6;
+    float* orientationY = orientationX + 3;
+    float* orientationZ = orientationY + 3;
+
+    const float4 row = tf[workerID];
+    center[workerID] = row.x * centerIn[0] + row.y * centerIn[1] + row.z * centerIn[2] + row.w;
+    orientationX[workerID] = row.x * orientationXIn[0] + row.y * orientationXIn[1] + row.z * orientationXIn[2];
+    orientationY[workerID] = row.x * orientationYIn[0] + row.y * orientationYIn[1] + row.z * orientationYIn[2];
+    orientationZ[workerID] = row.x * orientationZIn[0] + row.y * orientationZIn[1] + row.z * orientationZIn[2];
+
+    if (workerID == 0) {
+        output->halfSize = input->halfSize;
+    }
+}
+
+// fkineKernelAdj followed by the link-OBB transform of obbTfKern, in one launch.
+// Thread layout and fkine arithmetic are identical to fkineKernelAdj (12 threads per pose); after the kinematic chain
+// is complete, the same 12 threads transform the DOF + 1 link OBBs of their pose (3 rows per OBB).
+__global__ void fkineObbKernelAdj(float* q, float* TransformArray, const RTCD::OBB* obbs, RTCD::OBB* outOBBs,
+    unsigned int DOF, unsigned int nPoses) {
+    extern __shared__ float sharedTransforms[];
+    size_t idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= nPoses * 12) {
+        return;
+    }
+    size_t robotGlobalIdx          = idx / 12;
+    size_t localIdx                = idx % 12;
+    size_t robotLocalIdx           = threadIdx.x / 12;
+    float* localFirstLinkTransform = sharedTransforms + robotLocalIdx * DOF * 12;
+    for (int i = 0; i < DOF; i++) {
+        float sq, cq;
+        float qNow = *(q + robotGlobalIdx * DOF + i);
+        __sincosf(qNow, &sq, &cq);
+        size_t padding = i * 12 + localIdx;
+        localFirstLinkTransform[padding] = cq * cMask[padding] + sq * sMask[padding] + oMask[padding];
+    }
+    float* baseTransform = TransformArray + robotGlobalIdx * 12 * (DOF + 1);
+    baseShiftParallel(baseTransform, 0);
+    __syncthreads();
+    for (int i = 0; i < DOF; i++) {
+        affineMult(baseTransform + i * 12, localFirstLinkTransform + i * 12, baseTransform + (i + 1) * 12);
+        __syncthreads();
+    }
+
+    // The pose's DOF + 1 transforms (written by the 12 threads of this pose, same block) are now complete.
+    const float4* poseTfs = reinterpret_cast<const float4*>(baseTransform);
+    RTCD::OBB* poseOBBs   = outOBBs + robotGlobalIdx * (DOF + 1);
+    for (unsigned int w = localIdx; w < 3 * (DOF + 1); w += 12) {
+        const unsigned int linkId = w / 3;
+        transformOBBRow(poseTfs + linkId * 3, obbs + linkId, poseOBBs + linkId, w % 3);
+    }
+}
+
+void batchFkineAdjOBB(CUdeviceptr qs, CUdeviceptr TransformArray, CUdeviceptr obbTemplate, CUdeviceptr outOBBs,
+    size_t DOF, size_t nPoses, cudaStream_t stream) {
+    if (nPoses == 0) {
+        return;
+    }
+    const size_t numPosePerBlock = nPoses < 32 ? nPoses : 32;
+    const size_t numThreads      = numPosePerBlock * 12;
+    const size_t numBlocks       = (nPoses + numPosePerBlock - 1) / numPosePerBlock;
+    fkineObbKernelAdj<<<numBlocks, numThreads, DOF * 12 * numPosePerBlock * sizeof(float), stream>>>(
+        reinterpret_cast<float*>(qs), reinterpret_cast<float*>(TransformArray),
+        reinterpret_cast<const RTCD::OBB*>(obbTemplate), reinterpret_cast<RTCD::OBB*>(outOBBs), DOF, nPoses);
+}
+
 struct is_hit {
     __host__ __device__ bool operator()(int flag) const { return flag > 0; }
 };

@@ -97,6 +97,47 @@ namespace RTCD {
             reinterpret_cast<uint*>(sceneMask), reinterpret_cast<uint*>(rsMask));
     }
 
+    // Robot-mask-only broad phase. Writes robotMask[r] = number of scene OBBs colliding with robot OBB r, for every
+    // r < nROBBs (the same values BBCD accumulates with atomics into a zeroed mask), so no memset is needed.
+    // Block: BBCD_RM_X robot OBBs x BBCD_RM_Y scene lanes; each lane strides over the scene OBBs, then the block
+    // reduces the per-lane counts in shared memory.
+    constexpr unsigned int BBCD_RM_X = 32;
+    constexpr unsigned int BBCD_RM_Y = 8;
+    __global__ void BBCDRobotMaskKern(
+        const OBB* robotOBBs, const OBB* sceneOBBs, const size_t nROBBs, const size_t nSOBBs, uint* robotMask) {
+        __shared__ uint counts[BBCD_RM_Y][BBCD_RM_X];
+        const size_t robot_idx = blockIdx.x * BBCD_RM_X + threadIdx.x;
+
+        uint cnt = 0;
+        if (robot_idx < nROBBs) {
+            const OBB robotOBB = robotOBBs[robot_idx];
+            for (size_t s = threadIdx.y; s < nSOBBs; s += BBCD_RM_Y) {
+                cnt += checkOBBCollision(robotOBB, sceneOBBs[s]) ? 1u : 0u;
+            }
+        }
+        counts[threadIdx.y][threadIdx.x] = cnt;
+        __syncthreads();
+        if (threadIdx.y == 0 && robot_idx < nROBBs) {
+            uint total = 0;
+#pragma unroll
+            for (unsigned int y = 0; y < BBCD_RM_Y; y++) {
+                total += counts[y][threadIdx.x];
+            }
+            robotMask[robot_idx] = total;
+        }
+    }
+
+    void BBCDRobotMask(const CUdeviceptr robotOBBs, const CUdeviceptr sceneOBBs, const size_t nROBBs,
+        const size_t nSOBBs, CUdeviceptr robotMask, const cudaStream_t stream) {
+        if (nROBBs == 0) {
+            return;
+        }
+        const dim3 blockSize(BBCD_RM_X, BBCD_RM_Y, 1);
+        const dim3 gridSize(static_cast<unsigned int>((nROBBs + BBCD_RM_X - 1) / BBCD_RM_X), 1, 1);
+        BBCDRobotMaskKern<<<gridSize, blockSize, 0, stream>>>(reinterpret_cast<const OBB*>(robotOBBs),
+            reinterpret_cast<const OBB*>(sceneOBBs), nROBBs, nSOBBs, reinterpret_cast<uint*>(robotMask));
+    }
+
     __global__ void BBCDKern2(
         const OBB* robotOBBs, const OBB* sceneOBBs, const size_t nROBBs, const size_t nSOBBs, uint* rsMask) {
         const size_t robot_idx = blockIdx.x * blockDim.x + threadIdx.x;

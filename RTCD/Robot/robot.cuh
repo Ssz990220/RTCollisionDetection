@@ -20,6 +20,10 @@ void setSafeTransform(std::array<float, 12>& transform);
 
 void batchFkine(CUdeviceptr qs, CUdeviceptr TransformArray, size_t DOF, size_t nPoses, cudaStream_t stream = 0);
 void batchFkineAdj(CUdeviceptr qs, CUdeviceptr TransformArray, size_t DOF, size_t nPoses, cudaStream_t stream = 0);
+// batchFkineAdj + batchOBBTransform fused into a single launch (same outputs: TransformArray in the Adj layout,
+// outOBBs[pose * (DOF + 1) + link] = obbTemplate[link] transformed by the link pose).
+void batchFkineAdjOBB(CUdeviceptr qs, CUdeviceptr TransformArray, CUdeviceptr obbTemplate, CUdeviceptr outOBBs,
+    size_t DOF, size_t nPoses, cudaStream_t stream = 0);
 void batchFkineTraj(
     CUdeviceptr qs, CUdeviceptr TransformArray, size_t DOF, size_t nPoPerTraj, size_t nTraj, cudaStream_t stream = 0);
 
