@@ -9,6 +9,7 @@
 #include <Utils/OptiXIRUtils.h>
 #include <optix_stack_size.h>
 #include <optix_stubs.h>
+#include <cstring>
 #include <vector>
 
 inline constexpr bool PEROBS = false;
@@ -20,6 +21,11 @@ namespace RTCD {
 
     public:
         CollisionDetector() = default;
+        // Errors are ignored here: global detectors can be destroyed during process exit, after CUDA teardown.
+        ~CollisionDetector() { destroyOptix(false); }
+        // Owns OptiX handles (pipelines, program groups, modules): not copyable.
+        CollisionDetector(const CollisionDetector&)            = delete;
+        CollisionDetector& operator=(const CollisionDetector&) = delete;
 
         CollisionDetector(const OptixDeviceContext& context, const std::array<cudaStream_t, NSTREAM> streams);
 
@@ -108,13 +114,26 @@ namespace RTCD {
         OptixShaderBindingTable sbt = {};
         bool sbtBuilt               = false;
 
+        // Types that trace against OptiX built-in primitives (spheres / curves) need a built-in IS module whose
+        // build flags match the robot GAS (see getBuildFlags()).
+        static constexpr bool usesBuiltinIS = TYPE == LinkType::SPHERES || TYPE == LinkType::SPHERE_GAS
+                                           || TYPE == LinkType::LINEAR_CURVE || TYPE == LinkType::QUADRATIC_CURVE
+                                           || TYPE == LinkType::CUBIC_CURVE;
+        unsigned int moduleBuildFlags = 0; // flags the current modules were created with
+        bool optixCreated             = false;
+
 
         struct perStreamData {
             cudaStream_t stream;
             LaunchParams launchParams;
             std::vector<LaunchParams> launchParamsVec;
-            OptixPipeline pipeline;
+            OptixPipeline pipeline = nullptr;
             CUDABuffer launchParamsBuffer;
+            // Byte copy of what launchParamsBuffer currently holds, so unchanged params are not re-uploaded every
+            // launch (each cudaMemcpyAsync costs ~10-30 us of host time on WDDM). Invalidate whenever
+            // launchParamsBuffer is reallocated or written outside uploadLaunchParams().
+            alignas(LaunchParams) unsigned char lpUploaded[sizeof(LaunchParams)];
+            bool lpUploadedValid = false;
             CUDABuffer hitBuffer;
 
             // OBBs
@@ -136,6 +155,8 @@ namespace RTCD {
         CUdeviceptr resultPtr;
 
     private:
+        void destroyOptix(bool checkErrors = true);
+        void rebuildOptixIfFlagsChanged();
         void createModule(const unsigned int buildFlags);
         void createRaygenPrograms();
         void createMissPrograms();
@@ -150,6 +171,16 @@ namespace RTCD {
 
         inline unsigned int getBuildFlags();
         inline void setMapInfo(const size_t frameId);
+
+        // Async-upload sd.launchParams to the device unless the device copy is already identical.
+        inline void uploadLaunchParams(perStreamData& sd) {
+            if (sd.lpUploadedValid && std::memcmp(sd.lpUploaded, &sd.launchParams, sizeof(LaunchParams)) == 0) {
+                return;
+            }
+            sd.launchParamsBuffer.uploadAsync(&sd.launchParams, 1, sd.stream);
+            std::memcpy(sd.lpUploaded, &sd.launchParams, sizeof(LaunchParams));
+            sd.lpUploadedValid = true;
+        }
 
         void detectOBB(const size_t frameId); // Placeholder for future versions
         void detectOBB(const size_t frameId, const int nPoses); // Placeholder for future versions
@@ -194,13 +225,64 @@ namespace RTCD { // CC Initializers
 
     template <size_t NSTREAM, LinkType TYPE>
     void CollisionDetector<NSTREAM, TYPE>::setupOptix() {
-
-        createModule(getBuildFlags());
+        if (optixCreated) {
+            destroyOptix(); // re-setup (e.g. robot with different build flags): don't leak the old objects
+        }
+        moduleBuildFlags = getBuildFlags();
+        createModule(moduleBuildFlags);
 
         createRaygenPrograms();
         createMissPrograms();
         createHitgroupPrograms();
         createPipeline();
+        optixCreated = true;
+    }
+
+    template <size_t NSTREAM, LinkType TYPE>
+    void CollisionDetector<NSTREAM, TYPE>::destroyOptix(bool checkErrors) {
+        if (!optixCreated) {
+            return;
+        }
+        auto check = [checkErrors](OptixResult res) {
+            if (checkErrors) {
+                OPTIX_CHECK(res);
+            }
+        };
+        for (auto& sd : streamDatas) {
+            if (sd.pipeline) {
+                check(optixPipelineDestroy(sd.pipeline));
+                sd.pipeline = nullptr;
+            }
+            sd.graphCreated = false;
+        }
+        for (auto* pgs : {&raygenPGs, &missPGs, &hitgroupPGs}) {
+            for (auto pg : *pgs) {
+                if (pg) {
+                    check(optixProgramGroupDestroy(pg));
+                }
+            }
+            pgs->clear();
+        }
+        for (auto* m : {&Module, &sphereModule, &curveModule}) {
+            if (*m) {
+                check(optixModuleDestroy(*m));
+                *m = nullptr;
+            }
+        }
+        optixCreated = false;
+    }
+
+    template <size_t NSTREAM, LinkType TYPE>
+    void CollisionDetector<NSTREAM, TYPE>::rebuildOptixIfFlagsChanged() {
+        if constexpr (usesBuiltinIS) {
+            if (optixCreated && getBuildFlags() != moduleBuildFlags) {
+                const bool hadSBT = sbt.raygenRecord != 0;
+                setupOptix();
+                if (hadSBT) {
+                    buildSBT(); // SBT records are packed from the (now replaced) program groups
+                }
+            }
+        }
     }
 
     template <size_t NSTREAM, LinkType TYPE>
@@ -231,6 +313,7 @@ namespace RTCD { // CC Initializers
                 streamDatas[i].rsOBBInCol.alloc(sizeof(int) * r->getNOBBs() * sc->getNumObstacles());
             }
             streamDatas[i].launchParamsBuffer.free();
+                streamDatas[i].lpUploadedValid = false;
             streamDatas[i].launchParamsBuffer.alloc(sizeof(LaunchParams));
 
             streamDatas[i].graphCreated = false;
@@ -247,6 +330,7 @@ namespace RTCD { // CC Initializers
                 streamDatas[i].launchParamsVec.push_back(params);
             }
             streamDatas[i].launchParamsBuffer.upload(&streamDatas[i].launchParams, 1);
+            streamDatas[i].lpUploadedValid = false; // written outside uploadLaunchParams()
         }
 
         batchSize = r->getBatchSize();
@@ -257,6 +341,10 @@ namespace RTCD { // CC Initializers
         if (meshRobot->useOBB) {
             nRobotOBBs = r->getNOBBs();
         }
+
+        // setupOptix() may have run before this robot was attached (common call order); make sure the built-in IS
+        // module was created with this robot's GAS build flags.
+        rebuildOptixIfFlagsChanged();
     }
 
 
@@ -280,6 +368,7 @@ namespace RTCD { // CC Initializers
                 streamDatas[i].rsOBBInCol.alloc(sizeof(int) * r->getNOBBs() * sc->getNumObstacles());
             }
             streamDatas[i].launchParamsBuffer.free();
+                streamDatas[i].lpUploadedValid = false;
             streamDatas[i].launchParamsBuffer.alloc(sizeof(LaunchParams));
 
             streamDatas[i].graphCreated = false;
@@ -295,6 +384,7 @@ namespace RTCD { // CC Initializers
                 streamDatas[i].launchParamsVec.push_back(params);
             }
             streamDatas[i].launchParamsBuffer.upload(&streamDatas[i].launchParams, 1);
+            streamDatas[i].lpUploadedValid = false; // written outside uploadLaunchParams()
         }
 
         batchSize = r->getBatchSize();
@@ -319,6 +409,7 @@ namespace RTCD { // CC Initializers
                     streamDatas[i].rsOBBInCol.free();
                 }
                 streamDatas[i].launchParamsBuffer.free();
+                streamDatas[i].lpUploadedValid = false;
 
                 streamDatas[i].graphCreated = false;
 
@@ -336,6 +427,7 @@ namespace RTCD { // CC Initializers
                     streamDatas[i].rsOBBInCol.free();
                 }
                 streamDatas[i].launchParamsBuffer.free();
+                streamDatas[i].lpUploadedValid = false;
 
                 streamDatas[i].graphCreated = false;
 
@@ -426,8 +518,10 @@ namespace RTCD { // Key Functions
         for (int i = 0; i < batchSizeInfo.size(); i++) {
             pool.enqueueTask(task, batchSizeInfo[i]);
             if (i % NSTREAM == NSTREAM - 1) {
+                // Host-side barrier only: the next round reuses the same per-stream host state (launch params,
+                // build inputs). GPU work on each stream is already ordered, so no device-wide sync is needed here;
+                // the single CUDA_SYNC_CHECK() at the end of check() makes the results visible.
                 pool.waitForCompletion();
-                CUDA_SYNC_CHECK();
             }
         }
         pool.waitForCompletion();
@@ -479,6 +573,14 @@ namespace RTCD { // Key Functions
 namespace RTCD { // Optix Pipeline Setup
     template <size_t NSTREAM, LinkType TYPE>
     inline unsigned int CollisionDetector<NSTREAM, TYPE>::getBuildFlags() {
+        // Built-in intersection modules (spheres / curves) must be created with exactly the build flags of the GAS
+        // they intersect, otherwise OptiX faults at trace time (sticky CUDA error). So once a robot is attached,
+        // use its flags; the per-type defaults below only apply before setupRobot().
+        if constexpr (usesBuiltinIS) {
+            if (meshRobot) {
+                return meshRobot->getBuildFlags();
+            }
+        }
         if constexpr (TYPE == LinkType::SPHERES) {
             return OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
         } else if constexpr (TYPE == LinkType::SPHERE_GAS) {
@@ -554,25 +656,23 @@ namespace RTCD { // Optix Pipeline Setup
 
             char log[4096];
             size_t sizeof_log = sizeof(log);
-            OPTIX_CHECK(optixModuleCreate(optixContext, &moduleCompileOptions, &pipelineCompileOptions, input,
-                inputSize, log, &sizeof_log, &Module));
-#ifdef PRINTIT
-            if (sizeof_log > 1) {
+            const OptixResult moduleRes = optixModuleCreate(optixContext, &moduleCompileOptions,
+                &pipelineCompileOptions, input, inputSize, log, &sizeof_log, &Module);
+            if (sizeof_log > 1) { // print the compile log before bailing out, so failures are diagnosable
                 std::cout << log << std::endl;
             }
-#endif
+            OPTIX_CHECK(moduleRes);
         } else {
             const char* input = getInputData("CCCuda.cu", inputSize);
 
             char log[4096];
             size_t sizeof_log = sizeof(log);
-            OPTIX_CHECK(optixModuleCreate(optixContext, &moduleCompileOptions, &pipelineCompileOptions, input,
-                inputSize, log, &sizeof_log, &Module));
-#ifdef PRINTIT
-            if (sizeof_log > 1) {
+            const OptixResult moduleRes = optixModuleCreate(optixContext, &moduleCompileOptions,
+                &pipelineCompileOptions, input, inputSize, log, &sizeof_log, &Module);
+            if (sizeof_log > 1) { // print the compile log before bailing out, so failures are diagnosable
                 std::cout << log << std::endl;
             }
-#endif
+            OPTIX_CHECK(moduleRes);
         }
 
         OptixBuiltinISOptions builtinISOptions = {};
@@ -851,7 +951,7 @@ namespace RTCD {
         perStreamData& streamData = streamDatas[streamId];
 
         streamData.launchParams.traversable = handle;
-        streamData.launchParamsBuffer.uploadAsync(&streamData.launchParams, 1, streamData.stream);
+        uploadLaunchParams(streamData);
     }
 
     template <size_t NSTREAM, LinkType TYPE>
@@ -888,7 +988,7 @@ namespace RTCD {
         lp.verticesBuffer        = reinterpret_cast<float3*>(rayInfo.meshRays);
         lp.totalRayCount         = rayInfo.nRays;
         lp.mesh.primIdxToPoseIdx = reinterpret_cast<uint*>(meshRobot->getMapIndex(streamId));
-        lpBuffer.uploadAsync(&lp, 1, streamData.stream);
+        uploadLaunchParams(streamData); // lp aliases streamData.launchParams
 
         CUDA_CHECK(cudaMemsetAsync(
             reinterpret_cast<void*>(getHitBuffer(streamId)), 0, getHitBufferSize(streamId), streams[streamId]));
@@ -954,7 +1054,7 @@ namespace RTCD {
                 lp.robot.lkRays   = reinterpret_cast<float3**>(rayInfo.robotInfo.lkRays);
                 lp.robot.lkTfs    = reinterpret_cast<float*>(rayInfo.robotInfo.lkTfs);
 
-                lpBuffer.uploadAsync(&lp, 1, streamData.stream);
+                uploadLaunchParams(streamData); // lp aliases streamData.launchParams
                 OPTIX_CHECK(optixLaunch(streamData.pipeline, streamData.stream, lpBuffer.d_pointer(),
                     lpBuffer.sizeInBytes, &sbt, lp.totalRayCount, 1, 1));
                 CUDA_CHECK_LAST("Ray Shot");
@@ -971,11 +1071,8 @@ namespace RTCD {
                 lp.verticesBuffer        = reinterpret_cast<float3*>(rayInfo.meshRays);
                 lp.totalRayCount         = rayInfo.nRays;
                 lp.mesh.primIdxToPoseIdx = reinterpret_cast<uint*>(meshRobot->getMapIndex(streamId));
-                std::vector<uint> primIdxToPoseIdx(batchSize * (dof + 1));
-                CUDA_CHECK(cudaMemcpyAsync(primIdxToPoseIdx.data(), lp.mesh.primIdxToPoseIdx,
-                    batchSize * (dof + 1) * sizeof(uint), cudaMemcpyDeviceToHost, streamData.stream));
 
-                lpBuffer.uploadAsync(&lp, 1, streamData.stream);
+                uploadLaunchParams(streamData); // lp aliases streamData.launchParams
                 OPTIX_CHECK(optixLaunch(streamData.pipeline, streamData.stream, lpBuffer.d_pointer(),
                     lpBuffer.sizeInBytes, &sbt, lp.totalRayCount, 1, 1));
             }
@@ -1020,6 +1117,7 @@ namespace RTCD { // headline image helper function
             params.hitBuffer     = reinterpret_cast<int*>(streamDatas[i].hitBuffer.d_pointer());
 
             streamDatas[i].launchParamsBuffer.upload(&streamDatas[i].launchParams, 1);
+            streamDatas[i].lpUploadedValid = false; // written outside uploadLaunchParams()
         }
     }
 } // namespace RTCD

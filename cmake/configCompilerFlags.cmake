@@ -8,6 +8,15 @@ set(CUDA_NVCC_EXECUTABLE ${CMAKE_CUDA_COMPILER})
 set(CMAKE_CUDA_FLAGS_RELEASE "${CMAKE_CUDA_FLAGS_RELEASE} -lineinfo")
 set(CMAKE_CUDA_FLAGS_DEBUG "${CMAKE_CUDA_FLAGS_DEBUG} -G -g")
 
+# Newer MSVC STL versions reject CUDA toolkits older than the one they were released with
+# (error STL1002). Allow the mismatch so CUDA 13.2 can be used with VS 2026 / MSVC 14.52+.
+if(MSVC)
+  add_compile_definitions($<$<COMPILE_LANGUAGE:CUDA>:_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH>)
+  # CUDA 13's CCCL (Thrust/CUB/libcu++) requires the standard-conforming MSVC preprocessor.
+  add_compile_options($<$<COMPILE_LANGUAGE:CXX>:/Zc:preprocessor>
+                      $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>)
+endif()
+
 
 message(STATUS "CMAKE_CUDA_FLAGS_RELEASE: ${CMAKE_CUDA_FLAGS_RELEASE}")
 message(STATUS "CMAKE_CUDA_FLAGS_DEBUG: ${CMAKE_CUDA_FLAGS_DEBUG}")

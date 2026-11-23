@@ -112,12 +112,26 @@ int main() {
 
     CUDA_SYNC_CHECK();
     // Load the result
-    std::vector<int> result_gt(trajLength);
-    readBin(CONCAT_PATHS(PROJECT_BASE_DIR, "/data/motions/Panda4096Result.bin"), result_gt);
-    // result_gt = std::vector<int>(trajLength, 1);
-
     std::vector<uint> result(trajLength, 0);
     CC.downloadResult(result);
+
+    // Save the per-pose result first, so runs can be diffed even when no ground-truth file is available.
+#if defined(IAS)
+    save_cc_result("CCIAS_OBB_Result.bin", result, trajLength);
+#elif defined(RayOnlineRobot)
+    save_cc_result("CCRO_OBB_Result.bin", result, trajLength);
+#endif
+
+    const std::string gtFile = CONCAT_PATHS(PROJECT_BASE_DIR, "/data/motions/Panda4096Result.bin");
+    if (!std::filesystem::exists(gtFile)) {
+        std::cout << "No ground truth at " << gtFile << "; skipping comparison. Found: "
+                  << std::count_if(result.begin(), result.begin() + nCheck, [](uint i) { return i > 0; })
+                  << std::endl;
+        return 0;
+    }
+    std::vector<int> result_gt(trajLength);
+    readBin(gtFile, result_gt);
+    // result_gt = std::vector<int>(trajLength, 1);
     int found  = std::count_if(result.begin(), result.begin() + nCheck, [](int i) { return i > 0; });
     int should = std::count_if(result_gt.begin(), result_gt.begin() + nCheck, [](int i) { return i > 0; });
     // find the number of false positive and false negative

@@ -6,19 +6,17 @@
 #include <iostream>
 #include <optix.h>
 
-#if defined(_DEBUG) || defined(DEBUG)
-#define OPTIX_CHECK(call)                                                                             \
-    {                                                                                                 \
-        OptixResult res = call;                                                                       \
-        if (res != OPTIX_SUCCESS) {                                                                   \
-            fprintf(stderr, "Optix call (%s) failed with code %d (line %d)\n", #call, res, __LINE__); \
-            exit(2);                                                                                  \
-        }                                                                                             \
+// Checked in all build types: the check is a single host-side branch per OptiX API call, and
+// silently ignoring failures (e.g. a module that fails to compile) makes errors very hard to trace.
+#define OPTIX_CHECK(call)                                                                                    \
+    {                                                                                                        \
+        OptixResult res = call;                                                                              \
+        if (res != OPTIX_SUCCESS) {                                                                          \
+            fprintf(stderr, "Optix call (%s) failed with %s (%d) (%s:%d)\n", #call, optixGetErrorName(res), \
+                res, __FILE__, __LINE__);                                                                    \
+            exit(2);                                                                                         \
+        }                                                                                                    \
     }
-#else
-#define OPTIX_CHECK(call) \
-    { call; }
-#endif
 
 
 #define ASSERT_FAIL_MSG(msg) assertFailMsg(msg, __FILE__, __LINE__)

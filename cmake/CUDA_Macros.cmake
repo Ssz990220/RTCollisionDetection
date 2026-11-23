@@ -75,9 +75,11 @@ macro(cuda_compile_and_embed output_var format cuda_file_name)
     message(STATUS "${format}_file: ${${format}_file}")
   endif()
 
+  # Copy from the real object path so this works with any generator (VS, Ninja, Makefiles);
+  # the hard-coded ${output} path above only matches the Visual Studio layout on Windows.
   add_custom_command(
     OUTPUT ${${format}_file}
-    COMMAND ${CMAKE_COMMAND} -E copy ${output} ${${format}_file}
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_OBJECTS:${lib_name}> ${${format}_file}
     DEPENDS $<TARGET_OBJECTS:${lib_name}>
     COMMENT "compiling (and embedding ${format} from) ${cuda_file}"
     )

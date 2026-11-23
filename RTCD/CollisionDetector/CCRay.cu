@@ -76,8 +76,9 @@ extern "C" __global__ void __raygen__robotRayCompact() {
     uint idx   = optixGetLaunchIndex().x;
 
     // Decide which link this ray belongs to by a binary search
+    // Note: no __syncthreads() here. OptiX programs have no CUDA block semantics, barriers are not supported
+    // (rejected by OptiX 9 / CUDA 13), and nothing here needs synchronization anyway.
     uint linkIdx = binary_search(optixLaunchParams.robot.lkStarts, optixLaunchParams.robot.linkCnt, idx);
-    __syncthreads();
 
     // get all related data based on the link idx
     uint poseIdx         = optixLaunchParams.robot.lkPosMap[linkIdx];

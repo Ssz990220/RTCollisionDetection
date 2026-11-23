@@ -42,5 +42,7 @@ void batchOBBTransform(const CUdeviceptr TransformArray, const CUdeviceptr obbs,
 void batchOBBTransform2(const CUdeviceptr TransformArray, const CUdeviceptr obbs, CUdeviceptr output, size_t nPoses,
     size_t DOF, const cudaStream_t stream);
 
+// tmpSize is computed once (when it is 0); capacityN = largest N ever passed, so the cached size stays valid.
 void selectInsIdx(CUdeviceptr instances, CUdeviceptr idxMap, CUdeviceptr templateIns, CUdeviceptr templateMap,
-    CUdeviceptr mask, RTCD::CUDABuffer& tmp, size_t N, size_t& tmpSize, CUdeviceptr count, cudaStream_t stream);
+    CUdeviceptr mask, RTCD::CUDABuffer& tmp, size_t N, size_t& tmpSize, CUdeviceptr count, cudaStream_t stream,
+    size_t capacityN = 0);

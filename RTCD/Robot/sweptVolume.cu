@@ -19,66 +19,56 @@ __inline__ __device__ __host__ size_t powOf2(size_t v) {
     return v;
 }
 
-__global__ void genCtrlPtsKern(float* tPts, float* cPts, size_t nCPts, size_t nTPts) {
-    size_t idx_x             = blockIdx.x * blockDim.x + threadIdx.x;
-    size_t rndNTPts          = powOf2(nTPts);
-    size_t nThreadsPerCPoint = rndNTPts / 2 * 3; // 96
-    size_t nThreadsPerXYZ    = rndNTPts / 2; // 32
-    size_t nSMemPerPoint     = rndNTPts / 2 * 3;
+// Control point c[j] of curve k = sum_i w[j][i] * t[k][i] (per x/y/z), with weights in constant memory.
+// Layout: one group of nThreadsPerXYZ = powOf2(nTPts)/2 threads per (control point, axis); each thread first
+// sums 2 trajectory points, then the group does a shared-memory tree reduction.
+//
+// Previous version had three bugs (non-deterministic control points, seen as random flips in QUAD results):
+//  - the reduction let every thread < 1/4 update in every round (sdata[tid] += sdata[tid + offset] without the
+//    `tid < offset` guard), so threads read slots other threads were writing in the same round (data race);
+//  - half of the threads returned before the remaining __syncthreads() (divergent barrier = undefined behavior);
+//  - threads of the rounded-up last block indexed past the last curve (out-of-bounds read/write).
+__global__ void genCtrlPtsKern(const float* tPts, float* cPts, size_t nCPts, size_t nTPts, size_t nCurves) {
+    const size_t idx_x             = blockIdx.x * blockDim.x + threadIdx.x;
+    const size_t rndNTPts          = powOf2(nTPts);
+    const size_t nThreadsPerXYZ    = rndNTPts / 2; // threads per (control point, axis)
+    const size_t nThreadsPerCPoint = nThreadsPerXYZ * 3; // x, y, z
 
     float* sdataBlock = SharedMemory<float>();
-    ///////////////////////////
-    // point level variables //
-    ///////////////////////////
-    // global idx info
-    size_t trajIdx = idx_x / (nCPts * nThreadsPerCPoint);
-    // 0...48000, group by (64 / 2) * 3 * 16
-    size_t pointIdxInTraj = idx_x % (nCPts * nThreadsPerCPoint) / (nThreadsPerCPoint);
-    // 0...15, group by (64 / 2) * 3
-    size_t weightPadding = pointIdxInTraj * nTPts;
-    // 0, 64, 128, ...
-    float* g_idata = tPts + trajIdx * nTPts * 3;
-    // 64 * 3 floats of tPts per traj
-    float* g_odata = cPts + trajIdx * nCPts * 3 + pointIdxInTraj * 3;
-    // 16 * 3 floats of cPts per traj, 3 floats per point
-    float* splineWeightsLocal = splineWeights + weightPadding;
-    // 64 floats of splineWeights per traj
 
-    // local idx info
-    size_t pointIdxInBlock = threadIdx.x / nThreadsPerCPoint; // 0,1,2,3
-    float* sdataPoint      = sdataBlock + pointIdxInBlock * nSMemPerPoint;
-    ///////////////////////////
-    //  xyz level variables  //
-    ///////////////////////////
-    // cg::thread_block_tile<nThreadsPerXYZ> tileXYZ = cg::tiled_partition<nThreadsPerXYZ>(cg::this_thread_block());
-    size_t xyz = idx_x % nThreadsPerCPoint / nThreadsPerXYZ; // 0,1,2
-    // size_t tid = tileXYZ.thread_rank();
-    size_t tid   = idx_x % nThreadsPerXYZ; // 0...31
-    float* sdata = sdataPoint + xyz * nThreadsPerXYZ;
+    // which control point / axis / lane this thread works on
+    const size_t globalPoint    = idx_x / nThreadsPerCPoint; // over all curves
+    const bool active           = globalPoint < nCPts * nCurves; // last block is rounded up
+    const size_t trajIdx        = globalPoint / nCPts;
+    const size_t pointIdxInTraj = globalPoint % nCPts;
+    const size_t xyz            = idx_x % nThreadsPerCPoint / nThreadsPerXYZ; // 0,1,2
+    const size_t tid            = idx_x % nThreadsPerXYZ; // lane within the reduction group
 
-    ////////////////////////////
-    //         REDUCE         //
-    ////////////////////////////
+    float* sdata = sdataBlock + (threadIdx.x / nThreadsPerCPoint) * nThreadsPerCPoint + xyz * nThreadsPerXYZ;
 
-    sdata[tid] = g_idata[tid * 3 + xyz] * splineWeightsLocal[tid]
-               + g_idata[(tid + nThreadsPerXYZ) * 3 + xyz] * splineWeightsLocal[tid + nThreadsPerXYZ]
-                     * (tid + nThreadsPerXYZ < nTPts);
-
-    __syncthreads();
-
-    if (tid < rndNTPts / 4) {
-        for (int offset = rndNTPts / 4; offset > 0; offset /= 2) {
-            sdata[tid] = sdata[tid] + sdata[tid + offset];
-            __syncthreads();
+    // each lane sums trajectory points tid and tid + nThreadsPerXYZ (if it exists)
+    float partial = 0.0f;
+    if (active) {
+        const float* g_idata = tPts + trajIdx * nTPts * 3;
+        const float* w       = splineWeights + pointIdxInTraj * nTPts;
+        partial              = g_idata[tid * 3 + xyz] * w[tid];
+        const size_t i2      = tid + nThreadsPerXYZ;
+        if (i2 < nTPts) {
+            partial += g_idata[i2 * 3 + xyz] * w[i2];
         }
-    } else {
-        return;
+    }
+    sdata[tid] = partial;
+
+    // tree reduction; every thread of the block executes every barrier
+    for (size_t offset = nThreadsPerXYZ / 2; offset > 0; offset /= 2) {
+        __syncthreads();
+        if (tid < offset) {
+            sdata[tid] += sdata[tid + offset];
+        }
     }
 
-
-    // write result for this block to global mem
-    if (tid == 0) {
-        g_odata[xyz] = sdata[0];
+    if (active && tid == 0) {
+        cPts[trajIdx * nCPts * 3 + pointIdxInTraj * 3 + xyz] = sdata[0];
     }
 }
 
@@ -92,7 +82,7 @@ void batchGenControlPoints(float* tPts, float* cPts, size_t nCurves, cudaStream_
     int smemSize             = nThreadsPerCPoint * sizeof(float) * nPointsPerBlock;
     // divide by 2 for what mentioned above
 
-    genCtrlPtsKern<<<dimGrid, dimBlock, smemSize, stream>>>(tPts, cPts, nCPts, nTPts);
+    genCtrlPtsKern<<<dimGrid, dimBlock, smemSize, stream>>>(tPts, cPts, nCPts, nTPts, nCurves);
 }
 
 __device__ void OBB_1p(const float3& pt, const float r, OBB& obb) {

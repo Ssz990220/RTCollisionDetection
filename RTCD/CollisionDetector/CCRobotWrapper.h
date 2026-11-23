@@ -3,11 +3,27 @@
 #include <Robot/batchIASRobot.h>
 #include <Robot/batchRayRobot.h>
 #include <Robot/batchRobotConfig.h>
+#include <array>
+#include <cassert>
 #include <memory>
 #include <random>
 // #include <scene.h>
 
 using namespace RTCD;
+
+// Copy batch `frameIdx` of the packed pose array into its stream's pose buffer.
+// Batch k always starts at item k * batchSize: only the LAST batch may hold fewer than batchSize items, so the
+// offset must use batchSize, not nItems (using nItems read the wrong poses for a partial last batch).
+template <size_t NSTREAM>
+inline void copyBatchToStream(const CUDABuffer& allPoses, std::array<CUDABuffer, NSTREAM>& streamPoses,
+    const size_t frameIdx, const size_t nItems, const size_t batchSize, const size_t floatsPerItem,
+    cudaStream_t stream) {
+    assert(nItems <= batchSize && "a batch cannot hold more than batchSize items");
+    const size_t itemBytes = floatsPerItem * sizeof(float);
+    CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(streamPoses[frameIdx % NSTREAM].d_pointer()),
+        reinterpret_cast<const void*>(allPoses.d_pointer() + frameIdx * batchSize * itemBytes), nItems * itemBytes,
+        cudaMemcpyDeviceToDevice, stream));
+}
 
 template <size_t NSTREAM, LinkType TYPE>
 class CCWrappedRobot {
@@ -46,27 +62,13 @@ public:
     };
 
     // movePosesToStream
-    // @brief Move poses to stream data pool, can be useful when using cudaGraph
-    void movePosesToStream(const size_t frameIdx) {
-        const size_t idx = frameIdx % NSTREAM;
-        CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(posesBuffers[idx].d_pointer()),
-            reinterpret_cast<void*>(poses.d_pointer()
-                                    + frameIdx * batchRobot->getBatchSize() * batchRobot->getTrajSize()
-                                          * batchRobot->getDOF() * sizeof(float)),
-            batchRobot->getBatchSize() * batchRobot->getTrajSize() * batchRobot->getDOF() * sizeof(float),
-            cudaMemcpyDeviceToDevice, batchRobot->streams[idx]));
-    }
+    // @brief Copy batch `frameIdx` (nPoses items, default a full batch) into the stream's pose buffer, which gives
+    // each stream a stable input address (useful when using cudaGraph).
+    void movePosesToStream(const size_t frameIdx) { movePosesToStream(frameIdx, batchRobot->getBatchSize()); }
 
-    // movePosesToStream(size_t frameIdx, size_t nPoses)
-    // @brief Move poses (less than BatchSize specified) to stream data pool, can be useful when using cudaGraph
     void movePosesToStream(const size_t frameIdx, const size_t nPoses) {
-        const size_t idx = frameIdx % NSTREAM;
-        CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(posesBuffers[idx].d_pointer()),
-            reinterpret_cast<void*>(
-                poses.d_pointer()
-                + frameIdx * nPoses * batchRobot->getTrajSize() * batchRobot->getDOF() * sizeof(float)),
-            nPoses * batchRobot->getTrajSize() * batchRobot->getDOF() * sizeof(float), cudaMemcpyDeviceToDevice,
-            batchRobot->streams[idx]));
+        copyBatchToStream(poses, posesBuffers, frameIdx, nPoses, batchRobot->getBatchSize(),
+            batchRobot->getTrajSize() * batchRobot->getDOF(), batchRobot->streams[frameIdx % NSTREAM]);
     }
 
     void prepareRandomData() {
@@ -200,24 +202,11 @@ public: // Public Function implementation
         }
     };
 
-    void movePosesToStream(const size_t frameIdx) {
-        const size_t idx = frameIdx % NSTREAM;
-        CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(posesBuffers[idx].d_pointer()),
-            reinterpret_cast<void*>(poses.d_pointer()
-                                    + frameIdx * batchRobot->getBatchSize() * batchRobot->getTrajSize()
-                                          * batchRobot->getDOF() * sizeof(float)),
-            batchRobot->getBatchSize() * batchRobot->getTrajSize() * batchRobot->getDOF() * sizeof(float),
-            cudaMemcpyDeviceToDevice, batchRobot->streams[idx]));
-    }
+    void movePosesToStream(const size_t frameIdx) { movePosesToStream(frameIdx, batchRobot->getBatchSize()); }
 
     void movePosesToStream(const size_t frameIdx, const size_t nPoses) {
-        const size_t idx = frameIdx % NSTREAM;
-        CUDA_CHECK(cudaMemcpyAsync(reinterpret_cast<void*>(posesBuffers[idx].d_pointer()),
-            reinterpret_cast<void*>(
-                poses.d_pointer()
-                + frameIdx * nPoses * batchRobot->getTrajSize() * batchRobot->getDOF() * sizeof(float)),
-            nPoses * batchRobot->getTrajSize() * batchRobot->getDOF() * sizeof(float), cudaMemcpyDeviceToDevice,
-            batchRobot->streams[idx]));
+        copyBatchToStream(poses, posesBuffers, frameIdx, nPoses, batchRobot->getBatchSize(),
+            batchRobot->getTrajSize() * batchRobot->getDOF(), batchRobot->streams[frameIdx % NSTREAM]);
     }
 
     void prepareRandomData() {

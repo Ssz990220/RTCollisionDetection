@@ -8,9 +8,7 @@ using namespace RTCD;
 
 cudaError_t fillWeight(float* weights, size_t nWeights);
 
-__global__ void genCtrlPtsKern(
-    float* trajPoints, float* controlPoints, size_t nCurves, size_t nCtrlPoints, size_t nTrajPts);
-
+// trajPoints: nCurves * nTPts float3; controlPoints: nCurves * nCPts float3 (kernel is internal to sweptVolume.cu)
 void batchGenControlPoints(
     float* trajPoints, float* controlPoints, size_t nCurves, cudaStream_t stream, size_t nCPts, size_t nTPts);
 

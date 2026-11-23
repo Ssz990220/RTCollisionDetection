@@ -74,7 +74,7 @@ namespace RTCD // Batch Robot Classes Declaration
         cudaGraphExec_t instance;
 
         CUDABuffer dCount;
-        size_t selectTmpSize;
+        size_t selectTmpSize = 0; // 0 = not yet queried (was uninitialized, so the CUB size query could be skipped)
         uint maskCnt = 0;
 
         streamUniqueRobot() = default;
@@ -379,7 +379,8 @@ namespace RTCD // StreamUniqueRobot Implementation
             (CFG.DOF + 1) * CFG.BATCHSIZE, stream);
 
         selectInsIdx(batchInstancesBuffer.d_pointer(), indexMap.d_pointer(), instancesBuffer.d_pointer(),
-            indexMapTemplate, mask, tempBuffer, nPoses * (CFG.DOF + 1), selectTmpSize, dCount.d_pointer(), stream);
+            indexMapTemplate, mask, tempBuffer, nPoses * (CFG.DOF + 1), selectTmpSize, dCount.d_pointer(), stream,
+            CFG.BATCHSIZE * (CFG.DOF + 1));
         dCount.downloadAsync(&maskCnt, 1, stream);
         CUDA_CHECK(cudaStreamSynchronize(stream));
 

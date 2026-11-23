@@ -500,17 +500,19 @@ struct is_hit {
 };
 
 void selectInsIdx(CUdeviceptr instances, CUdeviceptr idxMap, CUdeviceptr templateIns, CUdeviceptr templateMap,
-    CUdeviceptr mask, RTCD::CUDABuffer& tmp, size_t N, size_t& tmpSize, CUdeviceptr count, cudaStream_t stream) {
-    if (tmpSize == 0) { // if first time,
+    CUdeviceptr mask, RTCD::CUDABuffer& tmp, size_t N, size_t& tmpSize, CUdeviceptr count, cudaStream_t stream,
+    size_t capacityN) {
+    if (tmpSize == 0) { // if first time, size the temp storage for the largest N this call site will see
+        const size_t sizeN = capacityN > N ? capacityN : N;
         size_t tmpSizeIns;
         cub::DeviceSelect::FlaggedIf(nullptr, tmpSizeIns, reinterpret_cast<OptixInstance*>(templateIns),
             reinterpret_cast<uint*>(mask), reinterpret_cast<OptixInstance*>(instances), reinterpret_cast<int*>(count),
-            N, is_hit(), stream);
+            sizeN, is_hit(), stream);
 
         size_t tmpSizeMap;
         cub::DeviceSelect::FlaggedIf(nullptr, tmpSizeMap, reinterpret_cast<uint*>(templateMap),
-            reinterpret_cast<uint*>(mask), reinterpret_cast<uint*>(idxMap), reinterpret_cast<int*>(count), N, is_hit(),
-            stream);
+            reinterpret_cast<uint*>(mask), reinterpret_cast<uint*>(idxMap), reinterpret_cast<int*>(count), sizeN,
+            is_hit(), stream);
 
         tmpSize = tmpSizeIns > tmpSizeMap ? tmpSizeIns : tmpSizeMap;
         if (tmp.sizeInBytes < tmpSize) {

@@ -203,11 +203,12 @@ namespace RTCD {
         }
     }
 
-    void exclusiveScan(
-        CUdeviceptr input, CUdeviceptr output, RTCD::CUDABuffer& tmp, size_t N, size_t& tmpSize, cudaStream_t stream) {
-        if (tmpSize == 0) { // if first time,
+    void exclusiveScan(CUdeviceptr input, CUdeviceptr output, RTCD::CUDABuffer& tmp, size_t N, size_t& tmpSize,
+        cudaStream_t stream, size_t capacityN) {
+        if (tmpSize == 0) { // if first time, size the temp storage for the largest N this call site will see
+            const size_t sizeN = capacityN > N ? capacityN : N;
             cub::DeviceScan::ExclusiveSum(
-                nullptr, tmpSize, reinterpret_cast<uint*>(input), reinterpret_cast<uint*>(input), N, stream);
+                nullptr, tmpSize, reinterpret_cast<uint*>(input), reinterpret_cast<uint*>(input), sizeN, stream);
         }
 
         if (tmp.sizeInBytes < tmpSize) {

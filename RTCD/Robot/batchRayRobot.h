@@ -388,10 +388,8 @@ namespace RTCD { // Implementation of streamRayRobot
         transformIsValid<uint, true>(mask, mask, nPoses * (CFG.DOF + 1), stream); // Turn mask into 0/1 array
         CUDA_CHECK_LAST("Transform");
 
-        exclusiveScan(mask, maskPrefixSumBuffer.d_pointer(), tempBuffer, nPoses * (CFG.DOF + 1),
-
-
-            cubTempSize, stream);
+        exclusiveScan(mask, maskPrefixSumBuffer.d_pointer(), tempBuffer, nPoses * (CFG.DOF + 1), cubTempSize, stream,
+            CFG.BATCHSIZE * (CFG.DOF + 1));
         CUDA_CHECK_LAST("Exclusive Scan");
 
         // compact tfs
@@ -421,7 +419,7 @@ namespace RTCD { // Implementation of streamRayRobot
         CUDA_CHECK_LAST("Compact Ray Ptrs");
 
         exclusiveScan(lkRayCntBuffer.d_pointer(), lkStartsBuffer.d_pointer(), tempBuffer, nPoses * (CFG.DOF + 1),
-            cubTempSize, stream);
+            cubTempSize, stream, CFG.BATCHSIZE * (CFG.DOF + 1));
 
         CUDA_CHECK_LAST("Exclusive Scan");
 

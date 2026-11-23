@@ -42,6 +42,24 @@ if (BUILD_TESTS)
     add_executable(testBinarySearch Test/testBinarySearch.cu)
     set_target_properties(testBinarySearch PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/Tests)
 
+    # Collision-result regression check: one executable per detector mode (see Test/ccRegression.cpp).
+    # Run all of them with `ctest -L regression` (append --write-golden to an exe to record a new golden).
+    set(REG_TARGETS "")
+    foreach(mode IAS RAY LINEAR QUAD)
+        string(TOLOWER ${mode} mode_lower)
+        set(name ccRegression_${mode_lower})
+        add_executable(${name} Test/ccRegression.cpp ${CU_SRC} ${UTIL_CUDA_SRC} ../Planner/KNN/knnCUDA.cu)
+        set_target_properties(${name} PROPERTIES FOLDER "Tests/CollisionDetector")
+        set_target_properties(${name} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/Tests)
+        target_link_libraries(${name} PRIVATE CollisionDetector)
+        target_compile_definitions(${name} PRIVATE REG_${mode})
+        add_test(NAME ${name} COMMAND ${name})
+        set_tests_properties(${name} PROPERTIES LABELS regression)
+        list(APPEND REG_TARGETS ${name})
+    endforeach()
+    add_custom_target(AllRegressionTests DEPENDS ${REG_TARGETS})
+    RTCD_add_source_groups()
+
 endif()
 
 set(CU_SRC ${CU_SRC} PARENT_SCOPE)

@@ -110,8 +110,10 @@ namespace RTCD { // template function declaration goes here
     void transformIsValid(const CUdeviceptr input, CUdeviceptr output, const size_t size, const cudaStream_t stream);
 
 
-    void exclusiveScan(
-        CUdeviceptr input, CUdeviceptr output, RTCD::CUDABuffer& tmp, size_t N, size_t& tmpSize, cudaStream_t stream);
+    // tmpSize is computed once (when it is 0) and cached by the caller. Pass capacityN = the largest N this call
+    // site will ever see, so the cached temp size is large enough for every later call.
+    void exclusiveScan(CUdeviceptr input, CUdeviceptr output, RTCD::CUDABuffer& tmp, size_t N, size_t& tmpSize,
+        cudaStream_t stream, size_t capacityN = 0);
 } // namespace RTCD
 
 #if defined(__CUDACC__)
