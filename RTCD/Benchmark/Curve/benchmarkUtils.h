@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <benchmark/benchmark.h>
 #include <nvtx3/nvToolsExt.h>
+#include <cstdlib>
 #include <random>
 
 using namespace RTCD;
@@ -61,6 +62,14 @@ void sample_trajectories(
 }
 
 
+// Optional curve GAS refit policy for benchmarking (see batchOptixCurveRobot::setRefitPolicy):
+// RTCD_BM_REFIT_EVERY=<K> overrides the library default (0 = always refit, 1 = rebuild every batch, K = every K-th).
+template <typename CurveRobot>
+void applyBenchmarkRefitPolicy(CurveRobot& robot) {
+    if (const char* v = std::getenv("RTCD_BM_REFIT_EVERY")) {
+        robot.setRefitPolicy(static_cast<size_t>(std::strtoull(v, nullptr, 10)));
+    }
+}
 template <int nCPts, int nTPts, int batchSize>
 void BM_LINEAR(benchmark::State& state) {
     static_assert(nCPts == nTPts, "nCPts and nTPts must be the same for linear case.");
@@ -78,6 +87,7 @@ void BM_LINEAR(benchmark::State& state) {
 
     // Robot Setup
     auto batchRobotPtr = std::make_shared<batchOptixCurveRobot<LINCFG>>(r, streams, optixContext);
+    applyBenchmarkRefitPolicy(*batchRobotPtr);
     auto ccRobot       = std::make_shared<CCWrappedRobot<NSTREAM, LinkType::LINEAR_CURVE>>(batchRobotPtr);
 
     // Prepare trajectory data
@@ -122,6 +132,7 @@ void BM_QUAD(benchmark::State& state) {
 
     // Robot Setup
     auto batchRobotPtr = std::make_shared<batchOptixCurveRobot<QUADCFG>>(r, streams, optixContext);
+    applyBenchmarkRefitPolicy(*batchRobotPtr);
     auto ccRobot       = std::make_shared<CCWrappedRobot<NSTREAM, LinkType::QUADRATIC_CURVE>>(batchRobotPtr);
 
     // Prepare trajectory data

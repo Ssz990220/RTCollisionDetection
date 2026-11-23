@@ -103,6 +103,32 @@ namespace RTCD {
         }
     };
 
+    // Refit (OPTIX_BUILD_OPERATION_UPDATE) the curve GAS instead of rebuilding it when the topology (number of
+    // trajectories in the batch) is unchanged. Topology (index buffer, primitive count, widths) is identical between
+    // batches; only the vertex positions move. When refits happen is a runtime policy
+    // (batchOptixCurveRobot::setRefitPolicy); the GAS is always built refittable so the policy can change freely.
+    template <batchRobotConfig CFG>
+    inline constexpr bool curveUseRefit = !CFG.useOBB; // OBB path: compacted topology changes every batch
+
+    // GAS build flags of the curve robot. The detector creates the built-in curve IS module with exactly these flags.
+    template <batchRobotConfig CFG>
+    constexpr unsigned int curveGASBuildFlags() {
+        unsigned int buildFlags = 0;
+        if constexpr (CFG.BUILD == BuildType::COMPACT) {
+            buildFlags |= (OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE);
+        }
+        if constexpr (CFG.BUILD == BuildType::FAST_BUILD) {
+            buildFlags |= OPTIX_BUILD_FLAG_PREFER_FAST_BUILD;
+        }
+        if constexpr (CFG.BUILD == BuildType::FAST_TRACE) {
+            buildFlags |= OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
+        }
+        if constexpr (curveUseRefit<CFG>) {
+            buildFlags |= OPTIX_BUILD_FLAG_ALLOW_UPDATE;
+        }
+        return buildFlags;
+    }
+
     template <batchRobotConfig CFG>
     struct streamCurveRobot final : public streamGASRobot<CFG> {
         streamCurveRobot(std::shared_ptr<robot<CFG.DOF>> robotPtr, cudaStream_t stream, OptixDeviceContext context,
@@ -119,7 +145,16 @@ namespace RTCD {
         // Debugging purpose
         void downloadOBBs(std::vector<OBB>& obbs);
 
+        // Build (or refit, see curveUseRefit) the curve GAS over the first nTraj trajectories of cPointsBuffer.
+        void buildCurveGAS(const size_t nTraj);
+        // fkine + sphere centers (+ control points) of nTraj trajectories into cPointsBuffer.
+        void genCurvePoints(const CUdeviceptr poses, const size_t nTraj);
+        bool useFusedKernel = false; // fused single-kernel point generation (if the config fits, see ctor)
+
         curveParam<CFG>& curveCFG;
+        size_t builtNTraj   = 0; // nTraj of the last full build (0 = no valid GAS yet)
+        size_t nRefits      = 0; // refits since the last full build
+        size_t rebuildEvery = 0; // refit policy, see batchOptixCurveRobot::setRefitPolicy
         CUdeviceptr cPointsPtr;
         CUDABuffer cPointsBuffer;
         CUDABuffer tPointsBuffer;
@@ -168,11 +203,42 @@ namespace RTCD {
 
         void resetGraph() override;
 
+        // Curve GAS refit policy (non-OBB configs). Collision results do not depend on it; only build vs. trace cost
+        // changes.
+        //  REFIT_AUTO (default): refit while a check has at most refitMaxBatches batches, full rebuild otherwise
+        //      (uses the detector's setBatchCountHint). Measured on the shelf benchmark (RTX 5080): refit wins for
+        //      single-batch checks (build-bound), rebuild wins for multi-batch checks (a refitted BVH keeps the
+        //      topology of unrelated earlier trajectories, so tracing gets slower).
+        //  0: refit whenever the batch size is unchanged; 1: full rebuild every batch;
+        //  K > 1: full rebuild every K-th build of a stream, refits in between.
+        static constexpr size_t REFIT_AUTO      = ~size_t(0);
+        // Threshold measured (BM_CURVE_Shelf, batch 16, median us, refit vs rebuild): 2 batches LINEAR 488 vs 619,
+        // QUAD 2238 vs 2203 (tie within cv); 4 batches LINEAR 802 vs 805 (tie), QUAD 3384 vs 2858 (refit loses).
+        static constexpr size_t refitMaxBatches = 2;
+        void setRefitPolicy(const size_t rebuildEvery) {
+            refitPolicy = rebuildEvery;
+            applyRefitPolicy();
+        }
+        void setBatchCountHint(const size_t nBatches) override {
+            batchCountHint = nBatches;
+            applyRefitPolicy();
+        }
+
         // Debugging purpose
         void downloadOBBs(const size_t idx, std::vector<OBB>& obbs);
 
     private:
         void loadCurveWeight();
+        void applyRefitPolicy() {
+            const size_t rebuildEvery =
+                refitPolicy != REFIT_AUTO ? refitPolicy : (batchCountHint <= refitMaxBatches ? 0 : 1);
+            for (auto& r : robots) {
+                r->rebuildEvery = rebuildEvery;
+            }
+        }
+
+        size_t refitPolicy    = REFIT_AUTO;
+        size_t batchCountHint = 0; // 0 = unknown -> refit in auto mode (single check() of unknown size)
 
     private:
         curveParam<CFG> curveCFG;
@@ -229,20 +295,13 @@ namespace RTCD { // Implementation of the streamCurveRobot
         Base::buildInput.curveArray.primitiveIndexOffset = 0;
         Base::buildInput.curveArray.endcapFlags          = 1;
 
-        unsigned int buildFlags = 0;
-        if constexpr (CFG.BUILD == BuildType::COMPACT) {
-            buildFlags |= (OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE);
-        }
-        if constexpr (CFG.BUILD == BuildType::FAST_BUILD) {
-            buildFlags |= OPTIX_BUILD_FLAG_PREFER_FAST_BUILD;
-        }
-        if constexpr (CFG.BUILD == BuildType::FAST_TRACE) {
-            buildFlags |= OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
-        }
-        Base::accelOptions.buildFlags = buildFlags;
+        Base::accelOptions.buildFlags = curveGASBuildFlags<CFG>();
         Base::accelOptions.operation  = OPTIX_BUILD_OPERATION_BUILD;
 
         preAllocCurveBuffer();
+
+        useFusedKernel = fkineSphrTrajSupported(CFG.DOF, curveCFG.nPoPerTraj, curveCFG.robotTotalSphereCount,
+            CFG.TYPE == LinkType::LINEAR_CURVE ? 0 : CFG.nCtrlPts);
 
         if constexpr (CFG.useOBB) { // overwrite build input
             std::cout << "Using OBB" << std::endl;
@@ -263,7 +322,8 @@ namespace RTCD { // Implementation of the streamCurveRobot
             &gasBufferSizes));
 
         Base::GASBuffer.alloc(gasBufferSizes.outputSizeInBytes);
-        Base::tempBuffer.alloc(gasBufferSizes.tempSizeInBytes);
+        // sizes are for the full batch (the largest nTraj); a refit needs tempUpdateSizeInBytes
+        Base::tempBuffer.alloc(std::max(gasBufferSizes.tempSizeInBytes, gasBufferSizes.tempUpdateSizeInBytes));
 
         // Allocate OBB and buffer for prefix sum and so
         if constexpr (CFG.useOBB) {
@@ -285,97 +345,28 @@ namespace RTCD { // Implementation of the streamCurveRobot
     }
 
     template <batchRobotConfig CFG>
-    void streamCurveRobot<CFG>::fkine(const CUdeviceptr poses) {
+    void streamCurveRobot<CFG>::genCurvePoints(const CUdeviceptr poses, const size_t nTraj) {
         using Base = streamGASRobot<CFG>;
-        batchFkineTraj(
-            poses, Base::transformBuffer.d_pointer(), CFG.DOF, curveCFG.nPoPerTraj, curveCFG.nTraj, Base::stream);
-        if constexpr (CFG.useOBB) {
-            if constexpr (CFG.TYPE == LinkType::LINEAR_CURVE) {
-                batchSphrCntrTraj(reinterpret_cast<float*>(Base::transformBuffer.d_pointer()),
-                    reinterpret_cast<float*>(Base::robotPtr->getSphereCenters()),
-                    reinterpret_cast<float*>(cPointsBuffer.d_pointer()), curveCFG.nPoPerTraj, CFG.BATCHSIZE,
-                    reinterpret_cast<int*>(Base::robotPtr->getSphereIdxMap()), curveCFG.robotTotalSphereCount, CFG.DOF,
-                    Base::stream);
-            } else {
-                batchSphrCntrTraj(reinterpret_cast<float*>(Base::transformBuffer.d_pointer()),
-                    reinterpret_cast<float*>(Base::robotPtr->getSphereCenters()),
-                    reinterpret_cast<float*>(tPointsBuffer.d_pointer()), curveCFG.nPoPerTraj, CFG.BATCHSIZE,
-                    reinterpret_cast<int*>(Base::robotPtr->getSphereIdxMap()), curveCFG.robotTotalSphereCount, CFG.DOF,
-                    Base::stream);
+        constexpr size_t nCtrl = CFG.TYPE == LinkType::LINEAR_CURVE ? 0 : CFG.nCtrlPts;
 
-                batchGenControlPoints(reinterpret_cast<float*>(tPointsBuffer.d_pointer()),
-                    reinterpret_cast<float*>(cPointsBuffer.d_pointer()), curveCFG.robotTotalSphereCount * CFG.BATCHSIZE,
-                    Base::stream, CFG.nCtrlPts, CFG.nTrajPts);
-            }
-            updateOBB(CFG.BATCHSIZE);
+        if (useFusedKernel) {
+            // one launch: fkine + sphere centers (+ control points); same values as the 2/3-kernel path below
+            batchFkineSphrTraj(poses, reinterpret_cast<const float*>(Base::robotPtr->getSphereCenters()),
+                reinterpret_cast<const int*>(Base::robotPtr->getSphereIdxMap()),
+                reinterpret_cast<float*>(cPointsBuffer.d_pointer()), CFG.DOF, curveCFG.nPoPerTraj, nTraj,
+                curveCFG.robotTotalSphereCount, nCtrl, Base::stream);
+            return;
         }
-    }
-
-    template <batchRobotConfig CFG>
-    void streamCurveRobot<CFG>::fkine(const CUdeviceptr poses, const size_t nPoses) {
-        using Base = streamGASRobot<CFG>;
-        batchFkineTraj(poses, Base::transformBuffer.d_pointer(), CFG.DOF, curveCFG.nPoPerTraj, nPoses, Base::stream);
-        if constexpr (CFG.useOBB) {
-            if constexpr (CFG.TYPE == LinkType::LINEAR_CURVE) {
-                batchSphrCntrTraj(reinterpret_cast<float*>(Base::transformBuffer.d_pointer()),
-                    reinterpret_cast<float*>(Base::robotPtr->getSphereCenters()),
-                    reinterpret_cast<float*>(cPointsBuffer.d_pointer()), curveCFG.nPoPerTraj, nPoses,
-                    reinterpret_cast<int*>(Base::robotPtr->getSphereIdxMap()), curveCFG.robotTotalSphereCount, CFG.DOF,
-                    Base::stream);
-            } else {
-                batchSphrCntrTraj(reinterpret_cast<float*>(Base::transformBuffer.d_pointer()),
-                    reinterpret_cast<float*>(Base::robotPtr->getSphereCenters()),
-                    reinterpret_cast<float*>(tPointsBuffer.d_pointer()), curveCFG.nPoPerTraj, nPoses,
-                    reinterpret_cast<int*>(Base::robotPtr->getSphereIdxMap()), curveCFG.robotTotalSphereCount, CFG.DOF,
-                    Base::stream);
-
-                batchGenControlPoints(reinterpret_cast<float*>(tPointsBuffer.d_pointer()),
-                    reinterpret_cast<float*>(cPointsBuffer.d_pointer()), curveCFG.robotTotalSphereCount * nPoses,
-                    Base::stream, CFG.nCtrlPts, CFG.nTrajPts);
-            }
-
-            updateOBB(nPoses);
-        }
-    }
-
-    template <batchRobotConfig CFG>
-    void streamCurveRobot<CFG>::updateAS(const CUdeviceptr poses) {
-        updateAS(poses, CFG.BATCHSIZE);
-    }
-
-    template <batchRobotConfig CFG>
-    void streamCurveRobot<CFG>::updateAS(const CUdeviceptr poses, const size_t nTraj) {
-        // Update batchsize first
-        using Base = streamGASRobot<CFG>;
-
-        Base::buildInput.curveArray.numVertices   = curveCFG.nCPtsPerTraj * nTraj;
-        Base::buildInput.curveArray.numPrimitives = curveCFG.nSegsPerTraj * nTraj;
 
         batchFkineTraj(poses, Base::transformBuffer.d_pointer(), CFG.DOF, curveCFG.nPoPerTraj, nTraj, Base::stream);
-
         if constexpr (CFG.TYPE == LinkType::LINEAR_CURVE) {
-
             // The piece wise linear representation of the curve does not need to compute the control points
             // Hense we store the traj points in cPointsBuffer
-
             batchSphrCntrTraj(reinterpret_cast<float*>(Base::transformBuffer.d_pointer()),
                 reinterpret_cast<float*>(Base::robotPtr->getSphereCenters()),
                 reinterpret_cast<float*>(cPointsBuffer.d_pointer()), curveCFG.nPoPerTraj, nTraj,
                 reinterpret_cast<int*>(Base::robotPtr->getSphereIdxMap()), curveCFG.robotTotalSphereCount, CFG.DOF,
                 Base::stream);
-
-            OPTIX_CHECK(optixAccelBuild(Base::context,
-                Base::stream, // CUDA stream
-                &(Base::accelOptions), &(Base::buildInput),
-                1, // num build inputs
-                Base::tempBuffer.d_pointer(), // temp buffer
-                Base::tempBuffer.sizeInBytes, // temp buffer size
-                Base::GASBuffer.d_pointer(), // output buffer
-                Base::GASBuffer.sizeInBytes, // output buffer size
-                &(Base::GASHandle), // AS handle
-                nullptr, // emitted property list
-                0 // num emitted properties
-                ));
         } else {
             batchSphrCntrTraj(reinterpret_cast<float*>(Base::transformBuffer.d_pointer()),
                 reinterpret_cast<float*>(Base::robotPtr->getSphereCenters()),
@@ -386,19 +377,67 @@ namespace RTCD { // Implementation of the streamCurveRobot
             batchGenControlPoints(reinterpret_cast<float*>(tPointsBuffer.d_pointer()),
                 reinterpret_cast<float*>(cPointsBuffer.d_pointer()), curveCFG.robotTotalSphereCount * nTraj,
                 Base::stream, CFG.nCtrlPts, CFG.nTrajPts);
+        }
+    }
 
-            OPTIX_CHECK(optixAccelBuild(Base::context,
-                Base::stream, // CUDA stream
-                &(Base::accelOptions), &(Base::buildInput),
-                1, // num build inputs
-                Base::tempBuffer.d_pointer(), // temp buffer
-                Base::tempBuffer.sizeInBytes, // temp buffer size
-                Base::GASBuffer.d_pointer(), // output buffer
-                Base::GASBuffer.sizeInBytes, // output buffer size
-                &(Base::GASHandle), // AS handle
-                nullptr, // emitted property list
-                0 // num emitted properties
-                ));
+    template <batchRobotConfig CFG>
+    void streamCurveRobot<CFG>::fkine(const CUdeviceptr poses) {
+        fkine(poses, CFG.BATCHSIZE);
+    }
+
+    template <batchRobotConfig CFG>
+    void streamCurveRobot<CFG>::fkine(const CUdeviceptr poses, const size_t nPoses) {
+        using Base = streamGASRobot<CFG>;
+        if constexpr (CFG.useOBB) {
+            genCurvePoints(poses, nPoses);
+            updateOBB(nPoses);
+        } else {
+            batchFkineTraj(poses, Base::transformBuffer.d_pointer(), CFG.DOF, curveCFG.nPoPerTraj, nPoses, Base::stream);
+        }
+    }
+
+    template <batchRobotConfig CFG>
+    void streamCurveRobot<CFG>::updateAS(const CUdeviceptr poses) {
+        updateAS(poses, CFG.BATCHSIZE);
+    }
+
+    template <batchRobotConfig CFG>
+    void streamCurveRobot<CFG>::updateAS(const CUdeviceptr poses, const size_t nTraj) {
+        genCurvePoints(poses, nTraj);
+        buildCurveGAS(nTraj);
+    }
+
+    template <batchRobotConfig CFG>
+    void streamCurveRobot<CFG>::buildCurveGAS(const size_t nTraj) {
+        using Base = streamGASRobot<CFG>;
+
+        // A refit keeps the BVH topology of the last full build, so it is only valid for the same primitive set
+        // (same nTraj; index buffer and widths never change). Any other nTraj (a partial last batch) rebuilds.
+        // rebuildEvery: 0 = refit whenever possible, K >= 1 = full rebuild at least every K-th build.
+        const bool refit = curveUseRefit<CFG> && builtNTraj == nTraj && (rebuildEvery == 0 || nRefits + 1 < rebuildEvery);
+
+        Base::buildInput.curveArray.numVertices   = curveCFG.nCPtsPerTraj * nTraj;
+        Base::buildInput.curveArray.numPrimitives = curveCFG.nSegsPerTraj * nTraj;
+        Base::accelOptions.operation = refit ? OPTIX_BUILD_OPERATION_UPDATE : OPTIX_BUILD_OPERATION_BUILD;
+
+        OPTIX_CHECK(optixAccelBuild(Base::context,
+            Base::stream, // CUDA stream
+            &(Base::accelOptions), &(Base::buildInput),
+            1, // num build inputs
+            Base::tempBuffer.d_pointer(), // temp buffer
+            Base::tempBuffer.sizeInBytes, // temp buffer size
+            Base::GASBuffer.d_pointer(), // output buffer
+            Base::GASBuffer.sizeInBytes, // output buffer size
+            &(Base::GASHandle), // AS handle
+            nullptr, // emitted property list
+            0 // num emitted properties
+            ));
+
+        if (refit) {
+            nRefits++;
+        } else {
+            builtNTraj = nTraj;
+            nRefits    = 0;
         }
     }
 
@@ -640,15 +679,7 @@ namespace RTCD { // Implementation of the batchOptixCurveRobot
 
     template <batchRobotConfig CFG>
     constexpr unsigned int batchOptixCurveRobot<CFG>::getBuildFlags() const {
-        if constexpr (CFG.BUILD == BuildType::COMPACT) {
-            return OPTIX_BUILD_FLAG_ALLOW_COMPACTION | OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
-        }
-        if constexpr (CFG.BUILD == BuildType::FAST_BUILD) {
-            return OPTIX_BUILD_FLAG_PREFER_FAST_BUILD;
-        }
-        if constexpr (CFG.BUILD == BuildType::FAST_TRACE) {
-            return OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
-        }
+        return curveGASBuildFlags<CFG>(); // must equal the GAS flags (built-in IS module is created from these)
     }
 
     template <batchRobotConfig CFG>

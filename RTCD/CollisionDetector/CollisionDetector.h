@@ -243,9 +243,10 @@ namespace RTCD { // CC Initializers
         if (!optixCreated) {
             return;
         }
-        auto check = [checkErrors](OptixResult res) {
+        // parameter must not be named `res`: OPTIX_CHECK(call) declares `OptixResult res = call;`
+        auto check = [checkErrors](OptixResult r) {
             if (checkErrors) {
-                OPTIX_CHECK(res);
+                OPTIX_CHECK(r);
             }
         };
         for (auto& sd : streamDatas) {
@@ -483,6 +484,12 @@ namespace RTCD { // Key Functions
                 // }
             }
             // }
+        }
+
+        if constexpr (TYPE != LinkType::RAY_ONLINE) {
+            if (meshRobot) {
+                meshRobot->setBatchCountHint(batchSizeInfo.size());
+            }
         }
 
 #ifdef USE_MULTI_THREADING

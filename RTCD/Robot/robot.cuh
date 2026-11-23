@@ -50,3 +50,10 @@ void batchOBBTransform2(const CUdeviceptr TransformArray, const CUdeviceptr obbs
 void selectInsIdx(CUdeviceptr instances, CUdeviceptr idxMap, CUdeviceptr templateIns, CUdeviceptr templateMap,
     CUdeviceptr mask, RTCD::CUDABuffer& tmp, size_t N, size_t& tmpSize, CUdeviceptr count, cudaStream_t stream,
     size_t capacityN = 0);
+// Curve robot: fused forward kinematics + sphere centers (+ quadratic/cubic B-spline control points when nCPts > 0)
+// for nTraj trajectories, one launch. Output layout equals batchSphrCntrTraj's (nCPts == 0) or
+// batchGenControlPoints' (nCPts > 0) output, bit-identical. Check fkineSphrTrajSupported() before calling.
+cudaError_t setCurveSplineWeights(const float* weights, size_t nElements);
+bool fkineSphrTrajSupported(size_t DOF, size_t nPoPerTraj, size_t nSpheres, size_t nCPts);
+void batchFkineSphrTraj(CUdeviceptr qs, const float* sphereTemplate, const int* sphereLink, float* out, size_t DOF,
+    size_t nPoPerTraj, size_t nTraj, size_t nSpheres, size_t nCPts, cudaStream_t stream);

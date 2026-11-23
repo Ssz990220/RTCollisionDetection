@@ -4,8 +4,14 @@
 __constant__ float splineWeights[512]; // Limit the product of N_CTRL_PTS * N_TRAJ_PTS to 512
 
 
+cudaError_t setCurveSplineWeights(const float* weights, size_t nElements); // robot.cu (fused curve kernel)
+
 cudaError_t fillWeight(float* weights, size_t nElements) {
-    return cudaMemcpyToSymbol(splineWeights, weights, nElements * sizeof(float));
+    cudaError_t err = cudaMemcpyToSymbol(splineWeights, weights, nElements * sizeof(float));
+    if (err != cudaSuccess) {
+        return err;
+    }
+    return setCurveSplineWeights(weights, nElements);
 }
 
 __inline__ __device__ __host__ size_t powOf2(size_t v) {
