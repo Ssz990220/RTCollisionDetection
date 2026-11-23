@@ -1040,23 +1040,29 @@ namespace RTCD {
             detectOBB(streamId, nPoses);
             const CUdeviceptr mask = getRobotMask(streamId);
 
+            // No host sync: the launch covers all nPoses * raysPerRobot rays and the raygen skips links whose OBB
+            // is collision free (mask read on the device). All params below are constant for a given stream and
+            // nPoses, so uploadLaunchParams() normally skips the upload.
             bool go = rayRobot->updateWithMask(mask, streamId, nPoses);
             if (go) {
                 const meshRayInfo rayInfo = rayRobot->getRayInfo(streamId);
-                lp.type           = rayType::ROBOT;
-                lp.totalRayCount  = rayInfo.nRays;
-                lp.verticesBuffer = nullptr;
-                lp.traversable    = sc->getHandle();
-                lp.hitBuffer      = reinterpret_cast<int*>(hitBuffer);
-                lp.robot.linkCnt  = rayInfo.robotInfo.linkCnt;
-                lp.robot.lkStarts = reinterpret_cast<uint*>(rayInfo.robotInfo.lkStarts);
-                lp.robot.lkPosMap = reinterpret_cast<uint*>(rayInfo.robotInfo.lkPosMap);
-                lp.robot.lkRays   = reinterpret_cast<float3**>(rayInfo.robotInfo.lkRays);
-                lp.robot.lkTfs    = reinterpret_cast<float*>(rayInfo.robotInfo.lkTfs);
+                lp.type                = rayType::ROBOT;
+                lp.totalRayCount       = rayInfo.nRays;
+                lp.verticesBuffer      = nullptr;
+                lp.traversable         = sc->getHandle();
+                lp.hitBuffer           = reinterpret_cast<int*>(hitBuffer);
+                lp.robot.raysPerRobot  = rayInfo.robotInfo.raysPerRobot;
+                lp.robot.linksPerRobot = rayInfo.robotInfo.linksPerRobot;
+                lp.robot.linkMask      = reinterpret_cast<const uint*>(rayInfo.robotInfo.linkMask);
+                lp.robot.rayLinkMap    = reinterpret_cast<const int*>(rayInfo.robotInfo.rayLinkMap);
+                lp.robot.rays          = reinterpret_cast<const float3*>(rayInfo.robotInfo.rays);
+                lp.robot.lkTfs         = reinterpret_cast<const float*>(rayInfo.robotInfo.lkTfs);
+                lp.robot.skipHitPoses  = rayInfo.robotInfo.skipHitPoses;
 
                 uploadLaunchParams(streamData); // lp aliases streamData.launchParams
+                // Launch width = min(nRays, robot's launch width cap); the raygen grid-strides over all nRays ids.
                 OPTIX_CHECK(optixLaunch(streamData.pipeline, streamData.stream, lpBuffer.d_pointer(),
-                    lpBuffer.sizeInBytes, &sbt, lp.totalRayCount, 1, 1));
+                    lpBuffer.sizeInBytes, &sbt, rayInfo.robotInfo.launchWidth, 1, 1));
                 CUDA_CHECK_LAST("Ray Shot");
             }
         } else { // shoot from obs

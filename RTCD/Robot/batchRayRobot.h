@@ -7,14 +7,6 @@
 #include <memory>
 
 namespace RTCD {
-    struct ORayData {
-        uint lastMask;
-        uint scanLinks;
-        uint lastRay;
-        uint scanRays;
-        ORayData() = default;
-    };
-
     template <batchRobotConfig CFG>
     struct streamRayRobot {
         cudaStream_t stream;
@@ -32,34 +24,18 @@ namespace RTCD {
         CUdeviceptr linkobbTemplate; // points to memory that contains DOF + 1 obbs
         CUDABuffer linkOBBsBuffer; // The link OBBs are transformed version of obbs in linkobbTempalte
 
-        // If RAY_ONLINE
-        uint lkCnt; // how many compacted links
-        uint totalRayCnt; // how many rays from all compacted links
-
-        CUdeviceptr lkRayPtrsTmpl;
-        CUdeviceptr lkPosMapTmpl;
-        CUdeviceptr lkRayCntTmpl;
-
-        CUDABuffer lkRayCntBuffer; // compacted link ray count
-        CUDABuffer lkStartsBuffer; // prefix sum of lkRayCntBuffer link's ray count, in order to locate which link this
-            // ray belongs to given a ray ID
-        CUDABuffer lkPosMapBuffer; // compacted link pose map
-        CUDABuffer lkTfCmpBuffer; // compacted link transforms based on mask
-        CUDABuffer lkRayPtrsBuffer; // compacted link ray pointers
-        CUDABuffer maskPrefixSumBuffer;
-        CUDABuffer tempBuffer;
+        // If RAY_ONLINE: the launch covers every ray of the nPoses robots of the batch (host-known count; the launch
+        // width is capped and the raygen grid-strides), and the raygen skips rays of links whose OBB is collision free. Nothing is compacted, so no count has to be read
+        // back to the host and the per-batch sequence has no host<->device round trip.
+        CUdeviceptr linkMaskPtr = 0; // OBB link mask of the current batch (owned by the detector)
+        uint totalRayCnt        = 0; // ray ids of the batch = nPoses * totalPerRoRay
+        uint launchWidthCap     = 0; // see batchRayRobot::setLaunchWidthCap
+        bool skipHitPoses       = true; // see batchRayRobot::setSkipHitPoses
 
         bool graphCreated = false;
         cudaGraph_t graph;
         cudaGraphExec_t instance;
 
-        ORayData cntData;
-        CUDABuffer cntDataBuffer;
-
-        size_t cubTempSize = 0;
-
-        // selected Ray shooting info // V2.5
-        std::array<uint, CFG.BATCHSIZE*(CFG.DOF + 1)> h_mask;
         std::vector<meshRayInfo> rayInfo;
         // std::vector<int> rayMap(CFG.BATCHSIZE*(CFG.DOF + 1));
 
@@ -119,6 +95,32 @@ namespace RTCD {
 
         void resetGraph() override;
 
+        // RAY_ONLINE launch tuning (applies to all streams; read by the detector through getRayInfo(idx)).
+        // The ray launch has one ray id per (pose, ray) of the batch, nPoses * getRayCount() ids. Most belong to
+        // links whose OBB is collision free and are skipped in the raygen. The launch width is capped and each launch
+        // index grid-strides over the ids, so skipped rays cost a loop iteration instead of a launched thread.
+        // A larger cap gives more parallelism per traced ray, a smaller one fewer idle threads. 0 = no cap (one
+        // launch index per ray id). Default 262144 was the best or near-best BM_RAY setting at every N from 1 to 4096
+        // (RTX 5080, Panda shelf scene, batch 1024).
+        void setLaunchWidthCap(const uint cap) {
+            launchWidthCap = cap;
+            for (auto& br : batchRobots) {
+                br.launchWidthCap = cap;
+            }
+        }
+        uint getLaunchWidthCap() const { return launchWidthCap; }
+
+        // If true, the raygen skips rays of poses whose hit count is already > 0. The per-pose collision flag
+        // (hit > 0) is unchanged. Hit counts become lower bounds, so turn this off if exact counts are needed.
+        // Costs one extra global load per surviving ray.
+        void setSkipHitPoses(const bool skip) {
+            skipHitPoses = skip;
+            for (auto& br : batchRobots) {
+                br.skipHitPoses = skip;
+            }
+        }
+        bool getSkipHitPoses() const { return skipHitPoses; }
+
 #if defined(_DEBUG) || defined(DEBUG)
         void downloadTransforms(std::vector<float4>& transforms, const size_t idx) const {
             transforms.resize((CFG.DOF + 1) * CFG.BATCHSIZE * 3);
@@ -149,13 +151,10 @@ namespace RTCD {
         CUDABuffer rayLinkMapBuffer;
         CUdeviceptr rayLinkMapPtr;
 
-        // If RAY_ONLINE
-        CUDABuffer lkRayPtrs; // Pointer to link rays. Contains DOF + 1 float3* ptrs (float3**)
-        CUDABuffer lkRayCntBuffer;
-        CUDABuffer lkPosMapBuffer;
-
         std::array<CUdeviceptr, CFG.DOF + 1> linkInRay; // V2.5
         std::vector<meshRayInfo> rayInfo;
+        uint launchWidthCap = 262144;
+        bool skipHitPoses   = true;
         std::array<CUdeviceptr, CFG.NSTREAM> rayOriginPtr; // backward compatability
         std::array<streamRayRobot<CFG>, CFG.NSTREAM> batchRobots;
     };
@@ -184,29 +183,20 @@ namespace RTCD { // Implementation of batchRayRobot
             br.rayLinkMapPtr   = rayLinkMapPtr;
             br.linkobbTemplate = robotPtr->getOBBs();
             br.linkInRay       = linkInRay;
+            br.launchWidthCap  = launchWidthCap;
+            br.skipHitPoses    = skipHitPoses;
             std::transform(linkRayCnt.begin(), linkRayCnt.end(), br.linkRayCnt.begin(),
                 [](size_t x) { return static_cast<uint>(x); });
 
             br.lkTfBuffer.alloc((CFG.DOF + 1) * CFG.BATCHSIZE * sizeof(float) * 12);
             br.linkOBBsBuffer.alloc(CFG.BATCHSIZE * (CFG.DOF + 1) * sizeof(OBB));
             br.rayInfo.resize(CFG.BATCHSIZE * (CFG.DOF + 1));
-            br.cntDataBuffer.alloc(sizeof(ORayData));
             rayOriginPtr[i] = rayVerticesPtr; // backward compatability
-
-            if constexpr (CFG.TYPE == LinkType::RAY_ONLINE) { // RAY_ONLINE
-                br.lkRayPtrsTmpl = lkRayPtrs.d_pointer();
-                br.lkRayCntTmpl  = lkRayCntBuffer.d_pointer();
-                br.lkPosMapTmpl  = lkPosMapBuffer.d_pointer();
-                br.lkPosMapBuffer.alloc(CFG.BATCHSIZE * (CFG.DOF + 1) * sizeof(uint));
-                br.lkRayCntBuffer.alloc(CFG.BATCHSIZE * (CFG.DOF + 1) * sizeof(uint));
-                br.lkRayPtrsBuffer.alloc(CFG.BATCHSIZE * (CFG.DOF + 1) * sizeof(CUdeviceptr));
-                br.lkTfCmpBuffer.alloc(CFG.BATCHSIZE * (CFG.DOF + 1) * sizeof(float) * 12);
-
-                br.lkStartsBuffer.alloc(roundUpLog2(CFG.BATCHSIZE * (CFG.DOF + 1)) * sizeof(uint));
-                br.maskPrefixSumBuffer.alloc(roundUpLog2(CFG.BATCHSIZE * (CFG.DOF + 1)) * sizeof(uint));
-
-                br.tempBuffer.alloc(CFG.BATCHSIZE * (CFG.DOF + 1) * sizeof(uint));
-            }
+        }
+        if constexpr (CFG.TYPE == LinkType::RAY_ONLINE) {
+            // Launch index is a uint (OptiX launch width limit is 2^30).
+            assert(static_cast<unsigned long long>(CFG.BATCHSIZE) * totalPerRoRay < (1ull << 30)
+                   && "RAY_ONLINE launch width (BATCHSIZE * rays per robot) exceeds the OptiX limit");
         }
     }
 
@@ -235,26 +225,6 @@ namespace RTCD { // Implementation of batchRayRobot
         std::transform(
             linkRayCnt.begin(), linkRayCnt.end(), linkRaySize.begin(), [](uint x) { return x * sizeof(float3) * 2; });
         std::exclusive_scan(linkRaySize.begin(), linkRaySize.end(), linkInRay.begin(), rayVerticesPtr);
-
-        if constexpr (CFG.TYPE == LinkType::RAY_ONLINE) { // RAY_ONLINE
-            std::vector<uint> lkPosMapVec;
-            std::vector<uint> lkRayCntVec;
-            std::vector<CUdeviceptr> lkRayPtrsVec;
-            // for (uint i = 0; i < CFG.DOF + 1; i++) {
-            //     lkPosMapVec.insert(lkPosMapVec.end(), lkPosMap.begin(), lkPosMap.end());
-            //     lkRayCntVec.resize((i + 1) * CFG.BATCHSIZE, linkRayCnt[i]);
-            //     lkRayPtrsVec.resize((i + 1) * CFG.BATCHSIZE, linkInRay[i]);
-            // }
-            for (uint i = 0; i < CFG.BATCHSIZE; i++) {
-                lkPosMapVec.resize((CFG.DOF + 1) * (i + 1), i);
-                lkRayCntVec.insert(lkRayCntVec.end(), linkRayCnt.begin(), linkRayCnt.end());
-                lkRayPtrsVec.insert(lkRayPtrsVec.end(), linkInRay.begin(), linkInRay.end());
-            }
-            lkPosMapBuffer.alloc_and_upload(lkPosMapVec);
-            lkRayPtrs.alloc_and_upload(lkRayPtrsVec);
-            lkRayCntBuffer.alloc_and_upload(lkRayCntVec);
-        }
-
 
         for (int i = 0; i < CFG.DOF + 1; ++i) {
             rayInfo.emplace_back(i, linkRayCnt[i], linkInRay[i]);
@@ -377,119 +347,23 @@ namespace RTCD { // Implementation of streamRayRobot
 
     template <batchRobotConfig CFG>
     inline const meshRayInfo streamRayRobot<CFG>::getRayInfo() const {
-        rayRobotInfo info{lkCnt, lkStartsBuffer.d_pointer(), lkPosMapBuffer.d_pointer(), lkRayPtrsBuffer.d_pointer(),
-            lkTfCmpBuffer.d_pointer()};
+        const uint launchWidth =
+            (launchWidthCap != 0 && totalRayCnt > launchWidthCap) ? launchWidthCap : totalRayCnt;
+        rayRobotInfo info{static_cast<uint>(totalPerRoRay), static_cast<uint>(CFG.DOF + 1),
+            static_cast<uint>(skipHitPoses), launchWidth, linkMaskPtr, rayLinkMapPtr, templateRayPtr,
+            lkTfBuffer.d_pointer()};
         return meshRayInfo(0, totalRayCnt, 0, info);
     }
 
+    // Records the batch's OBB link mask (> 0: the link's OBB overlaps an obstacle OBB) for the ray launch. Issues no
+    // GPU work and no host<->device synchronization: the raygen reads the mask directly and skips collision-free
+    // links, so the launch width is the host-known nPoses * totalPerRoRay. Returns whether there is anything to
+    // launch; whether any link actually survived the OBB test is only known on the device.
     template <batchRobotConfig CFG>
     inline bool streamRayRobot<CFG>::updateWithMask(const CUdeviceptr mask, const size_t nPoses) {
-
-        transformIsValid<uint, true>(mask, mask, nPoses * (CFG.DOF + 1), stream); // Turn mask into 0/1 array
-        CUDA_CHECK_LAST("Transform");
-
-        exclusiveScan(mask, maskPrefixSumBuffer.d_pointer(), tempBuffer, nPoses * (CFG.DOF + 1), cubTempSize, stream,
-            CFG.BATCHSIZE * (CFG.DOF + 1));
-        CUDA_CHECK_LAST("Exclusive Scan");
-
-        // compact tfs
-        compactCpy<true>(lkTfCmpBuffer.d_pointer(), lkTfBuffer.d_pointer(), mask, maskPrefixSumBuffer.d_pointer(),
-            sizeof(float) * 12, nPoses * (CFG.DOF + 1), stream);
-        CUDA_CHECK_LAST("Compact Tf");
-
-        // compact compacted linkId to poseId map
-        CUDA_CHECK(cudaMemsetAsync(
-            reinterpret_cast<void*>(lkPosMapBuffer.d_pointer()), 0, nPoses * (CFG.DOF + 1) * sizeof(uint), stream));
-        compactCpy<true>(lkPosMapBuffer.d_pointer(), lkPosMapTmpl, mask, maskPrefixSumBuffer.d_pointer(), sizeof(uint),
-            nPoses * (CFG.DOF + 1), stream);
-        CUDA_CHECK_LAST("Compact LinkPose Map");
-
-        // compact link ray counts
-        CUDA_CHECK(cudaMemsetAsync(
-            reinterpret_cast<void*>(lkRayCntBuffer.d_pointer()), 0, nPoses * (CFG.DOF + 1) * sizeof(uint), stream));
-        compactCpy<true>(lkRayCntBuffer.d_pointer(), lkRayCntTmpl, mask, maskPrefixSumBuffer.d_pointer(), sizeof(uint),
-            nPoses * (CFG.DOF + 1), stream);
-        CUDA_CHECK_LAST("Compact Ray Count");
-
-        // compact link ray ptrs
-        CUDA_CHECK(cudaMemsetAsync(reinterpret_cast<void*>(lkRayPtrsBuffer.d_pointer()), 0,
-            nPoses * (CFG.DOF + 1) * sizeof(CUdeviceptr), stream));
-        compactCpy<true>(lkRayPtrsBuffer.d_pointer(), lkRayPtrsTmpl, mask, maskPrefixSumBuffer.d_pointer(),
-            sizeof(CUdeviceptr), nPoses * (CFG.DOF + 1), stream);
-        CUDA_CHECK_LAST("Compact Ray Ptrs");
-
-        exclusiveScan(lkRayCntBuffer.d_pointer(), lkStartsBuffer.d_pointer(), tempBuffer, nPoses * (CFG.DOF + 1),
-            cubTempSize, stream, CFG.BATCHSIZE * (CFG.DOF + 1));
-
-        CUDA_CHECK_LAST("Exclusive Scan");
-
-        gatherCntData(mask, maskPrefixSumBuffer.d_pointer(), lkRayCntTmpl, lkStartsBuffer.d_pointer(),
-            cntDataBuffer.d_pointer(), nPoses * (CFG.DOF + 1), stream);
-
-        cudaMemcpyAsync(&cntData, reinterpret_cast<void*>(cntDataBuffer.d_pointer()), sizeof(ORayData),
-            cudaMemcpyDeviceToHost, stream);
-
-        CUDA_CHECK_LAST("Memcpy");
-
-#if defined(_DEBUG) || defined(DEBUG)
-        std::vector<uint> hMasks(nPoses * (CFG.DOF + 1));
-        cudaMemcpyAsync(
-            hMasks.data(), (void*) mask, nPoses * (CFG.DOF + 1) * sizeof(uint), cudaMemcpyDeviceToHost, stream);
-
-        std::vector<uint> hMaskPrefixSum(nPoses * (CFG.DOF + 1));
-        maskPrefixSumBuffer.downloadAsync(hMaskPrefixSum, stream);
-
-        std::vector<float> hTfCmp(nPoses * (CFG.DOF + 1) * 12);
-        lkTfCmpBuffer.downloadAsync(hTfCmp, stream);
-
-        std::vector<uint> hPosMap(nPoses * (CFG.DOF + 1));
-        lkPosMapBuffer.downloadAsync(hPosMap, stream);
-
-        std::vector<uint> hRayCntTemp(nPoses * (CFG.DOF + 1));
-        cudaMemcpyAsync(hRayCntTemp.data(), (void*) lkRayCntTmpl, nPoses * (CFG.DOF + 1) * sizeof(uint),
-            cudaMemcpyDeviceToHost, stream);
-        std::vector<uint> hRayCnt(hRayCntTemp.size());
-        lkRayCntBuffer.downloadAsync(hRayCnt, stream);
-
-        std::vector<CUdeviceptr> hTempRayPtr(CFG.NSTREAM * (CFG.DOF + 1));
-        cudaMemcpyAsync(hTempRayPtr.data(), (void*) lkRayPtrsTmpl, CFG.NSTREAM * (CFG.DOF + 1) * sizeof(CUdeviceptr),
-            cudaMemcpyDeviceToHost, stream);
-
-        std::vector<CUdeviceptr> hRayPtrs(hTempRayPtr.size());
-        lkRayPtrsBuffer.downloadAsync(hRayPtrs, stream);
-
-        std::vector<uint> hStarts;
-        hStarts.resize(nPoses * (CFG.DOF + 1));
-        lkStartsBuffer.downloadAsync(hStarts, stream);
-#endif
-        cudaStreamSynchronize(stream);
-        CUDA_CHECK_LAST("Sync");
-
-        lkCnt       = cntData.scanLinks + cntData.lastMask;
-        totalRayCnt = cntData.scanRays + cntData.lastRay * (lkCnt == (nPoses * (CFG.DOF + 1)));
-#if defined(_DEBUG) || defined(DEBUG)
-        // find the max
-        auto max = std::max_element(hMasks.begin(), hMasks.end());
-        // find the sum
-        auto sum = std::accumulate(hMasks.begin(), hMasks.end(), 0);
-        auto cnt = std::count_if(hMasks.begin(), hMasks.end(), [](uint x) { return x > 0; });
-
-        // find the first 0 in hRayCnt
-        auto firstZero = std::find(hRayCnt.begin(), hRayCnt.end(), 0);
-        std::cout << "First zero: " << std::distance(hRayCnt.begin(), firstZero) << std::endl;
-        // decide if all the elements after the first zero are 0
-        auto allZero = std::all_of(firstZero, hRayCnt.end(), [](uint x) { return x == 0; });
-        std::cout << "All zero: " << allZero << std::endl;
-
-
-        // compute exclusive scan on CPU as well
-        std::vector<uint> hRayCntScan(hRayCnt.size());
-        std::exclusive_scan(hRayCnt.begin(), hRayCnt.end(), hRayCntScan.begin(), 0);
-        // compare the results
-        auto isEqual = std::equal(hRayCntScan.begin(), hRayCntScan.begin() + lkCnt, hStarts.begin());
-        std::cout << "Scan Equal: " << isEqual << std::endl;
-
-#endif
+        assert(nPoses <= CFG.BATCHSIZE && "The number of poses should be smaller than the batch size");
+        linkMaskPtr = mask;
+        totalRayCnt = static_cast<uint>(nPoses * totalPerRoRay);
         return totalRayCnt > 0;
     }
 } // namespace RTCD

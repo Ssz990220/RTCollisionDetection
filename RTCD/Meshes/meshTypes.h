@@ -7,16 +7,22 @@ namespace RTCD {
 
     // subset of the launch parameter required for RAY_ONLINE robot
     // refer to launchParameters.h for full definition
+    // (see rayRobotCfg for the meaning of each field)
     struct rayRobotInfo {
-        uint linkCnt;
-        CUdeviceptr lkStarts;
-        CUdeviceptr lkPosMap;
-        CUdeviceptr lkRays;
+        uint raysPerRobot;
+        uint linksPerRobot;
+        uint skipHitPoses;
+        uint launchWidth; // optixLaunch width: min(nRays, the robot's launch width cap); raygen grid-strides over nRays
+        CUdeviceptr linkMask;
+        CUdeviceptr rayLinkMap;
+        CUdeviceptr rays;
         CUdeviceptr lkTfs;
 
         rayRobotInfo() = default;
-        rayRobotInfo(uint linkCnt, CUdeviceptr lkStarts, CUdeviceptr lkPosMap, CUdeviceptr lkRays, CUdeviceptr lkTfs)
-            : linkCnt(linkCnt), lkStarts(lkStarts), lkPosMap(lkPosMap), lkRays(lkRays), lkTfs(lkTfs) {}
+        rayRobotInfo(uint raysPerRobot, uint linksPerRobot, uint skipHitPoses, uint launchWidth, CUdeviceptr linkMask,
+            CUdeviceptr rayLinkMap, CUdeviceptr rays, CUdeviceptr lkTfs)
+            : raysPerRobot(raysPerRobot), linksPerRobot(linksPerRobot), skipHitPoses(skipHitPoses),
+              launchWidth(launchWidth), linkMask(linkMask), rayLinkMap(rayLinkMap), rays(rays), lkTfs(lkTfs) {}
     };
 
     struct meshRayInfo {

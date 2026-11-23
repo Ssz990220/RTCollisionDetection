@@ -36,82 +36,61 @@ extern "C" __global__ void __anyhit__RayData() {
 }
 
 
-__device__ uint binary_search(const uint* prefix_sum, uint size, const uint id) {
-    // Boundary checks to avoid returning MAX_UINT when id is out of range
-    if (size == 0) {
-        return (1UL << 32) - 1;
-    }
-    if (id < prefix_sum[0]) {
-        return 0;
-    }
-    if (id >= prefix_sum[size - 1]) {
-        return size - 1;
-    }
-
-    int left  = 0;
-    int right = size - 1;
-    for (uint i = 0; i < (32 - __clz(size)); ++i) { // A fixed maximum of 32 iterations for safety
-        uint mid = left + (right - left) / 2;
-
-        // Condition checks converted into arithmetic expressions
-        bool greater = (prefix_sum[mid] > id); // 1 if true, 0 if false
-        bool within  = (prefix_sum[mid] <= id) && (mid == size - 1 || prefix_sum[mid + 1] > id);
-
-        // Exit early if the target is found
-        if (within) {
-            return mid;
-        }
-
-        // Update boundaries based on conditions
-        left  = left * greater + (mid + 1) * !greater;
-        right = (mid - 1) * greater + right * !greater;
-    }
-
-
-    return (1UL << 32) - 1; // If not found, which should not happen with correct input
-}
-
+// RAY_ONLINE robot rays. (The entry name is kept for the pipeline; the rays are no longer compacted.)
+// Ray id = poseIdx * raysPerRobot + rayIdx over the whole batch (totalRayCount = nPoses * raysPerRobot ids). The launch
+// width may be smaller than totalRayCount: each launch index walks the ids with a stride of the launch width, so a
+// skipped ray costs a loop iteration instead of a launched thread, and consecutive launch indices stay on consecutive
+// rays (same pose and link) in every iteration.
+// A ray is traced only if its link's OBB hit an obstacle OBB (linkMask > 0) and its pose is not already known to be in
+// collision. The first condition selects exactly the rays the former mask-compacted launch traced, with the same
+// transform and endpoints; the second only skips rays of poses whose hit count is already > 0, so per-pose collision
+// flags are identical (hit counts may be lower). No compaction or host read-back of a ray count is needed.
+// Note: no __syncthreads() here. OptiX programs have no CUDA block semantics, barriers are not supported
+// (rejected by OptiX 9 / CUDA 13), and nothing here needs synchronization anyway.
 extern "C" __global__ void __raygen__robotRayCompact() {
-    uint3 idx3 = optixGetLaunchIndex();
-    uint idx   = optixGetLaunchIndex().x;
+    const rayRobotCfg& cfg = optixLaunchParams.robot;
+    const uint total       = optixLaunchParams.totalRayCount;
+    const uint stride      = optixGetLaunchDimensions().x;
+    int* hitBuffer         = optixLaunchParams.hitBuffer;
 
-    // Decide which link this ray belongs to by a binary search
-    // Note: no __syncthreads() here. OptiX programs have no CUDA block semantics, barriers are not supported
-    // (rejected by OptiX 9 / CUDA 13), and nothing here needs synchronization anyway.
-    uint linkIdx = binary_search(optixLaunchParams.robot.lkStarts, optixLaunchParams.robot.linkCnt, idx);
+    for (uint id = optixGetLaunchIndex().x; id < total; id += stride) {
+        const uint poseIdx = id / cfg.raysPerRobot;
+        const uint rayIdx  = id - poseIdx * cfg.raysPerRobot;
+        const uint linkIdx = static_cast<uint>(cfg.rayLinkMap[rayIdx]);
+        const uint glbLink = poseIdx * cfg.linksPerRobot + linkIdx;
+        if (cfg.linkMask[glbLink] == 0) {
+            continue; // link OBB is collision free: its rays cannot hit anything
+        }
+        if (cfg.skipHitPoses && *(volatile int*) (hitBuffer + poseIdx) != 0) {
+            continue; // pose already in collision
+        }
+        const float* linkTransform = cfg.lkTfs + glbLink * 12;
 
-    // get all related data based on the link idx
-    uint poseIdx         = optixLaunchParams.robot.lkPosMap[linkIdx];
-    float3* linkRays     = optixLaunchParams.robot.lkRays[linkIdx];
-    uint linkStart       = optixLaunchParams.robot.lkStarts[linkIdx];
-    float* linkTransform = optixLaunchParams.robot.lkTfs + linkIdx * 12;
+        // get the ray info
+        const float3 origin = cfg.rays[rayIdx * 2];
+        const float3 target = cfg.rays[rayIdx * 2 + 1];
 
-    // get the ray info
-    uint rayIdx         = idx - linkStart;
-    const float3 origin = linkRays[rayIdx * 2];
-    const float3 target = linkRays[rayIdx * 2 + 1];
+        float3 newOrigin, newTarget;
+        transformPoint(linkTransform, origin, newOrigin);
+        transformPoint(linkTransform, target, newTarget);
 
-    float3 newOrigin, newTarget;
-    transformPoint(linkTransform, origin, newOrigin);
-    transformPoint(linkTransform, target, newTarget);
+        float distance;
+        float3 rayDir = normallength(newTarget - newOrigin, distance);
 
-    float distance;
-    float3 rayDir = normallength(newTarget - newOrigin, distance);
+        unsigned int u0 = 0;
+        optixTrace(optixLaunchParams.traversable, newOrigin, rayDir,
+            0.f, // tmin
+            distance, // tmax
+            0.0f, // rayTime
+            OptixVisibilityMask(255),
+            OPTIX_RAY_FLAG_DISABLE_ANYHIT, // OPTIX_RAY_FLAG_NONE,
+            SURFACE_RAY_TYPE, // SBT offset
+            RAY_TYPE_COUNT, // SBT stride
+            SURFACE_RAY_TYPE, // missSBTIndex
+            u0);
 
-    unsigned int u0 = 0;
-    optixTrace(optixLaunchParams.traversable, newOrigin, rayDir,
-        0.f, // tmin
-        distance, // tmax
-        0.0f, // rayTime
-        OptixVisibilityMask(255),
-        OPTIX_RAY_FLAG_DISABLE_ANYHIT, // OPTIX_RAY_FLAG_NONE,
-        SURFACE_RAY_TYPE, // SBT offset
-        RAY_TYPE_COUNT, // SBT stride
-        SURFACE_RAY_TYPE, // missSBTIndex
-        u0);
-
-    if (u0 == 1) {
-        atomicAdd((int*) optixLaunchParams.hitBuffer + poseIdx, 1);
-        // optixLaunchParams.hitBuffer[poseIdx] += 1;
+        if (u0 == 1) {
+            atomicAdd(hitBuffer + poseIdx, 1);
+        }
     }
 }

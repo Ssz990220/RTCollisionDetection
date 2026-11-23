@@ -11,15 +11,20 @@ enum class rayType {
     MESH,
 };
 
+// RAY_ONLINE: one ray id per (pose, ray) of the batch, LaunchParams::totalRayCount = nPoses * raysPerRobot (host-known,
+// so no device->host count read-back is needed). The launch width may be smaller (capped); the raygen grid-strides
+// over the ids. Rays of links whose OBB is free (linkMask == 0) are skipped before tracing.
 struct rayRobotCfg {
-    uint linkCnt; // how many compacted links
-    uint* lkStarts; // prefix sum of each compacted link's ray count, in order to locate which link this ray belongs to
-                    // given a ray ID
-    uint* lkPosMap; // map linkIdx to poseIdx
-    float3** lkRays; // pointers to each link's device rays (float3 * 2)
-    float* lkTfs; // compacted link transforms
+    uint raysPerRobot; // rays of one robot (all links), launch index = poseIdx * raysPerRobot + rayIdx
+    uint linksPerRobot; // DOF + 1
+    uint skipHitPoses; // != 0: skip rays of poses whose hit count is already > 0 (flags unchanged, counts may drop)
+    const uint* linkMask; // [nPoses * linksPerRobot] OBB result per (pose, link), > 0 means trace the link's rays
+    const int* rayLinkMap; // [raysPerRobot] ray index within the robot -> link index
+    const float3* rays; // [raysPerRobot * 2] robot-local ray endpoints (origin, target), ordered by link
+    const float* lkTfs; // [nPoses * linksPerRobot * 12] link transforms (row-major 3x4)
 
-    rayRobotCfg() : linkCnt(0), lkStarts(nullptr), lkPosMap(nullptr), lkRays(nullptr), lkTfs(nullptr) {}
+    rayRobotCfg()
+        : raysPerRobot(0), linksPerRobot(0), skipHitPoses(1), linkMask(nullptr), rayLinkMap(nullptr), rays(nullptr), lkTfs(nullptr) {}
 };
 
 // launch info for shooting rays from one link to obs
