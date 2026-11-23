@@ -7,10 +7,6 @@
 #include <Robot/sweptVolume.cuh>
 #include <Utils/cuda/cudaAlgorithms.cuh>
 #include <memory>
-#ifdef RTCD_CURVE_FUSED_SELFCHECK
-#include <atomic>
-#include <cstring>
-#endif
 // #include <string_view>
 
 namespace RTCD {
@@ -331,40 +327,6 @@ namespace RTCD { // Implementation of the streamCurveRobot
         using Base = streamGASRobot<CFG>;
         constexpr size_t nCtrl = CFG.TYPE == LinkType::LINEAR_CURVE ? 0 : CFG.nCtrlPts;
 
-#ifdef RTCD_CURVE_FUSED_SELFCHECK // temporary: compare fused vs. separate kernels bit for bit
-        if (useFusedKernel) {
-            const size_t nFloats = (nCtrl == 0 ? curveCFG.nPoPerTraj : nCtrl) * curveCFG.robotTotalSphereCount * nTraj * 3;
-            useFusedKernel = false;
-            genCurvePoints(poses, nTraj);
-            std::vector<float> ref(nFloats), fused(nFloats);
-            cudaMemcpyAsync(ref.data(), reinterpret_cast<void*>(cPointsBuffer.d_pointer()), nFloats * sizeof(float),
-                cudaMemcpyDeviceToHost, Base::stream);
-            cudaMemsetAsync(reinterpret_cast<void*>(cPointsBuffer.d_pointer()), 0xff, nFloats * sizeof(float), Base::stream);
-            useFusedKernel = true;
-            batchFkineSphrTraj(poses, reinterpret_cast<const float*>(Base::robotPtr->getSphereCenters()),
-                reinterpret_cast<const int*>(Base::robotPtr->getSphereIdxMap()),
-                reinterpret_cast<float*>(cPointsBuffer.d_pointer()), CFG.DOF, curveCFG.nPoPerTraj, nTraj,
-                curveCFG.robotTotalSphereCount, nCtrl, Base::stream);
-            cudaMemcpyAsync(fused.data(), reinterpret_cast<void*>(cPointsBuffer.d_pointer()), nFloats * sizeof(float),
-                cudaMemcpyDeviceToHost, Base::stream);
-            cudaStreamSynchronize(Base::stream);
-            static std::atomic<size_t> nChecked{0}, nBad{0};
-            size_t bad = 0;
-            for (size_t i = 0; i < nFloats; i++) {
-                bad += std::memcmp(&ref[i], &fused[i], sizeof(float)) != 0;
-            }
-            nChecked += nFloats;
-            nBad += bad;
-            if (bad) {
-                std::cout << "FUSED SELFCHECK MISMATCH: " << bad << " of " << nFloats << " floats" << std::endl;
-            }
-            static std::atomic<int> nCalls{0};
-            if ((++nCalls % 256) == 1) {
-                std::cout << "FUSED SELFCHECK: checked " << nChecked << " floats, mismatches " << nBad << std::endl;
-            }
-            return;
-        }
-#endif
         if (useFusedKernel) {
             // one launch: fkine + sphere centers (+ control points); same values as the 2/3-kernel path below
             batchFkineSphrTraj(poses, reinterpret_cast<const float*>(Base::robotPtr->getSphereCenters()),
