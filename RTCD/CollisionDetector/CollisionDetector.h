@@ -1057,15 +1057,12 @@ namespace RTCD {
                 lp.robot.rayLinkMap    = reinterpret_cast<const int*>(rayInfo.robotInfo.rayLinkMap);
                 lp.robot.rays          = reinterpret_cast<const float3*>(rayInfo.robotInfo.rays);
                 lp.robot.lkTfs         = reinterpret_cast<const float*>(rayInfo.robotInfo.lkTfs);
-                // EXPERIMENT knobs (to be fixed to constants): launch width cap and hit-pose skipping
-                static const unsigned int expCap  = [] { const char* s = std::getenv("RTCD_RAY_CAP"); return s ? (unsigned int) std::strtoul(s, nullptr, 10) : 0u; }();
-                static const unsigned int expSkip = [] { const char* s = std::getenv("RTCD_RAY_SKIPHIT"); return s ? (unsigned int) std::strtoul(s, nullptr, 10) : 1u; }();
-                lp.robot.skipHitPoses = expSkip;
-                const unsigned int width = (expCap != 0 && lp.totalRayCount > expCap) ? expCap : lp.totalRayCount;
+                lp.robot.skipHitPoses  = rayInfo.robotInfo.skipHitPoses;
 
                 uploadLaunchParams(streamData); // lp aliases streamData.launchParams
+                // Launch width = min(nRays, robot's launch width cap); the raygen grid-strides over all nRays ids.
                 OPTIX_CHECK(optixLaunch(streamData.pipeline, streamData.stream, lpBuffer.d_pointer(),
-                    lpBuffer.sizeInBytes, &sbt, width, 1, 1));
+                    lpBuffer.sizeInBytes, &sbt, rayInfo.robotInfo.launchWidth, 1, 1));
                 CUDA_CHECK_LAST("Ray Shot");
             }
         } else { // shoot from obs

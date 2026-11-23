@@ -24,11 +24,13 @@ namespace RTCD {
         CUdeviceptr linkobbTemplate; // points to memory that contains DOF + 1 obbs
         CUDABuffer linkOBBsBuffer; // The link OBBs are transformed version of obbs in linkobbTempalte
 
-        // If RAY_ONLINE: the launch covers every ray of the nPoses robots of the batch (host-known width), and the
-        // raygen skips rays of links whose OBB is collision free. Nothing is compacted, so no count has to be read
+        // If RAY_ONLINE: the launch covers every ray of the nPoses robots of the batch (host-known count; the launch
+        // width is capped and the raygen grid-strides), and the raygen skips rays of links whose OBB is collision free. Nothing is compacted, so no count has to be read
         // back to the host and the per-batch sequence has no host<->device round trip.
         CUdeviceptr linkMaskPtr = 0; // OBB link mask of the current batch (owned by the detector)
-        uint totalRayCnt        = 0; // launch width = nPoses * totalPerRoRay
+        uint totalRayCnt        = 0; // ray ids of the batch = nPoses * totalPerRoRay
+        uint launchWidthCap     = 0; // see batchRayRobot::setLaunchWidthCap
+        bool skipHitPoses       = true; // see batchRayRobot::setSkipHitPoses
 
         bool graphCreated = false;
         cudaGraph_t graph;
@@ -93,6 +95,32 @@ namespace RTCD {
 
         void resetGraph() override;
 
+        // RAY_ONLINE launch tuning (applies to all streams; read by the detector through getRayInfo(idx)).
+        // The ray launch has one ray id per (pose, ray) of the batch, nPoses * getRayCount() ids. Most belong to
+        // links whose OBB is collision free and are skipped in the raygen. The launch width is capped and each launch
+        // index grid-strides over the ids, so skipped rays cost a loop iteration instead of a launched thread.
+        // A larger cap gives more parallelism per traced ray, a smaller one fewer idle threads. 0 = no cap (one
+        // launch index per ray id). Default 262144 was the best or near-best BM_RAY setting at every N from 1 to 4096
+        // (RTX 5080, Panda shelf scene, batch 1024).
+        void setLaunchWidthCap(const uint cap) {
+            launchWidthCap = cap;
+            for (auto& br : batchRobots) {
+                br.launchWidthCap = cap;
+            }
+        }
+        uint getLaunchWidthCap() const { return launchWidthCap; }
+
+        // If true, the raygen skips rays of poses whose hit count is already > 0. The per-pose collision flag
+        // (hit > 0) is unchanged. Hit counts become lower bounds, so turn this off if exact counts are needed.
+        // Costs one extra global load per surviving ray.
+        void setSkipHitPoses(const bool skip) {
+            skipHitPoses = skip;
+            for (auto& br : batchRobots) {
+                br.skipHitPoses = skip;
+            }
+        }
+        bool getSkipHitPoses() const { return skipHitPoses; }
+
 #if defined(_DEBUG) || defined(DEBUG)
         void downloadTransforms(std::vector<float4>& transforms, const size_t idx) const {
             transforms.resize((CFG.DOF + 1) * CFG.BATCHSIZE * 3);
@@ -125,6 +153,8 @@ namespace RTCD {
 
         std::array<CUdeviceptr, CFG.DOF + 1> linkInRay; // V2.5
         std::vector<meshRayInfo> rayInfo;
+        uint launchWidthCap = 262144;
+        bool skipHitPoses   = true;
         std::array<CUdeviceptr, CFG.NSTREAM> rayOriginPtr; // backward compatability
         std::array<streamRayRobot<CFG>, CFG.NSTREAM> batchRobots;
     };
@@ -153,6 +183,8 @@ namespace RTCD { // Implementation of batchRayRobot
             br.rayLinkMapPtr   = rayLinkMapPtr;
             br.linkobbTemplate = robotPtr->getOBBs();
             br.linkInRay       = linkInRay;
+            br.launchWidthCap  = launchWidthCap;
+            br.skipHitPoses    = skipHitPoses;
             std::transform(linkRayCnt.begin(), linkRayCnt.end(), br.linkRayCnt.begin(),
                 [](size_t x) { return static_cast<uint>(x); });
 
@@ -315,8 +347,11 @@ namespace RTCD { // Implementation of streamRayRobot
 
     template <batchRobotConfig CFG>
     inline const meshRayInfo streamRayRobot<CFG>::getRayInfo() const {
-        rayRobotInfo info{static_cast<uint>(totalPerRoRay), static_cast<uint>(CFG.DOF + 1), linkMaskPtr, rayLinkMapPtr,
-            templateRayPtr, lkTfBuffer.d_pointer()};
+        const uint launchWidth =
+            (launchWidthCap != 0 && totalRayCnt > launchWidthCap) ? launchWidthCap : totalRayCnt;
+        rayRobotInfo info{static_cast<uint>(totalPerRoRay), static_cast<uint>(CFG.DOF + 1),
+            static_cast<uint>(skipHitPoses), launchWidth, linkMaskPtr, rayLinkMapPtr, templateRayPtr,
+            lkTfBuffer.d_pointer()};
         return meshRayInfo(0, totalRayCnt, 0, info);
     }
 

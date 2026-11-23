@@ -11,12 +11,13 @@ enum class rayType {
     MESH,
 };
 
-// RAY_ONLINE: one launch index per (pose, ray) of the batch, launch width = nPoses * raysPerRobot (host-known, so no
-// device->host count read-back is needed). Rays of links whose OBB is free (linkMask == 0) exit before tracing.
+// RAY_ONLINE: one ray id per (pose, ray) of the batch, LaunchParams::totalRayCount = nPoses * raysPerRobot (host-known,
+// so no device->host count read-back is needed). The launch width may be smaller (capped); the raygen grid-strides
+// over the ids. Rays of links whose OBB is free (linkMask == 0) are skipped before tracing.
 struct rayRobotCfg {
     uint raysPerRobot; // rays of one robot (all links), launch index = poseIdx * raysPerRobot + rayIdx
     uint linksPerRobot; // DOF + 1
-    uint skipHitPoses; // EXPERIMENT: skip rays of poses already in collision
+    uint skipHitPoses; // != 0: skip rays of poses whose hit count is already > 0 (flags unchanged, counts may drop)
     const uint* linkMask; // [nPoses * linksPerRobot] OBB result per (pose, link), > 0 means trace the link's rays
     const int* rayLinkMap; // [raysPerRobot] ray index within the robot -> link index
     const float3* rays; // [raysPerRobot * 2] robot-local ray endpoints (origin, target), ordered by link

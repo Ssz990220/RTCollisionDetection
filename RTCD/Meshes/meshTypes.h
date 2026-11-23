@@ -11,16 +11,18 @@ namespace RTCD {
     struct rayRobotInfo {
         uint raysPerRobot;
         uint linksPerRobot;
+        uint skipHitPoses;
+        uint launchWidth; // optixLaunch width: min(nRays, the robot's launch width cap); raygen grid-strides over nRays
         CUdeviceptr linkMask;
         CUdeviceptr rayLinkMap;
         CUdeviceptr rays;
         CUdeviceptr lkTfs;
 
         rayRobotInfo() = default;
-        rayRobotInfo(uint raysPerRobot, uint linksPerRobot, CUdeviceptr linkMask, CUdeviceptr rayLinkMap,
-            CUdeviceptr rays, CUdeviceptr lkTfs)
-            : raysPerRobot(raysPerRobot), linksPerRobot(linksPerRobot), linkMask(linkMask), rayLinkMap(rayLinkMap),
-              rays(rays), lkTfs(lkTfs) {}
+        rayRobotInfo(uint raysPerRobot, uint linksPerRobot, uint skipHitPoses, uint launchWidth, CUdeviceptr linkMask,
+            CUdeviceptr rayLinkMap, CUdeviceptr rays, CUdeviceptr lkTfs)
+            : raysPerRobot(raysPerRobot), linksPerRobot(linksPerRobot), skipHitPoses(skipHitPoses),
+              launchWidth(launchWidth), linkMask(linkMask), rayLinkMap(rayLinkMap), rays(rays), lkTfs(lkTfs) {}
     };
 
     struct meshRayInfo {
