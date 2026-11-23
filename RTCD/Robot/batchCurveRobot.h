@@ -212,7 +212,9 @@ namespace RTCD {
         //  0: refit whenever the batch size is unchanged; 1: full rebuild every batch;
         //  K > 1: full rebuild every K-th build of a stream, refits in between.
         static constexpr size_t REFIT_AUTO      = ~size_t(0);
-        static constexpr size_t refitMaxBatches = 1;
+        // Threshold measured (BM_CURVE_Shelf, batch 16, median us, refit vs rebuild): 2 batches LINEAR 488 vs 619,
+        // QUAD 2238 vs 2203 (tie within cv); 4 batches LINEAR 802 vs 805 (tie), QUAD 3384 vs 2858 (refit loses).
+        static constexpr size_t refitMaxBatches = 2;
         void setRefitPolicy(const size_t rebuildEvery) {
             refitPolicy = rebuildEvery;
             applyRefitPolicy();
