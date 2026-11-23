@@ -319,6 +319,164 @@ void batchSphrCntrTraj(float* TransformArray, float* PointsArray, float* Shifted
         nTraj, pointIdxToLinkIdx, totalTemplatePointCount, DOF);
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Fused curve-robot kernel: forward kinematics of one trajectory + sphere centers (+ B-spline control points), one
+// block per trajectory, everything except the final points kept in shared memory. Replaces the
+// fkineTrajKernel -> genSphrTrajKer (-> genCtrlPtsKern) sequence with one launch and no global round trip of the
+// transforms. Every arithmetic expression is written exactly as in those kernels (same operand order, so the same
+// FMA contraction), so the produced points are bit-identical.
+//
+// Lives in this file because it needs the fkine masks / base transform in this TU's constant memory (no RDC).
+__constant__ float curveSplineWeights[512]; // copy of sweptVolume.cu's splineWeights (filled by fillWeight)
+
+cudaError_t setCurveSplineWeights(const float* weights, size_t nElements) {
+    return cudaMemcpyToSymbol(curveSplineWeights, weights, nElements * sizeof(float));
+}
+
+// H = powOf2(nTPts) / 2: size of genCtrlPtsKern's reduction group. CTRL = false: linear curve (output = sphere
+// centers, which are the curve vertices).
+template <bool CTRL, int H>
+__global__ void fkineSphrTrajKern(const float* q, const float* sphereTemplate, const int* sphereLink, float* out,
+    const int DOF, const int nPoPerTraj, const int nSpheres, const int nCPts) {
+    extern __shared__ float smem[];
+    float* localTf = smem; // [nPoPerTraj][DOF][12]
+    float* tfs     = localTf + nPoPerTraj * DOF * 12; // [DOF + 1][nPoPerTraj][12]
+    float* tPts    = tfs + (DOF + 1) * nPoPerTraj * 12; // CTRL only: [nSpheres][nPoPerTraj][3]
+
+    const size_t trajIdx = blockIdx.x;
+
+    // ---- forward kinematics (fkineTrajKernel), blockDim.x == nPoPerTraj * 12 ----
+    {
+        const size_t poIdxInTraj       = threadIdx.x / 12;
+        const size_t idxInPo           = threadIdx.x % 12;
+        float* localFirstLinkTransform = localTf + poIdxInTraj * DOF * 12;
+        const float* qPose             = q + (trajIdx * nPoPerTraj + poIdxInTraj) * DOF;
+        for (int i = 0; i < DOF; i++) {
+            float sq, cq;
+            float qNow = *(qPose + i);
+            __sincosf(qNow, &sq, &cq);
+            size_t padding                   = i * 12 + idxInPo;
+            localFirstLinkTransform[padding] = cq * cMask[padding] + sq * sMask[padding] + oMask[padding];
+        }
+        const size_t TPadding = nPoPerTraj * 12;
+        float* baseTransform  = tfs + poIdxInTraj * 12;
+        baseShiftParallel(baseTransform, 0);
+        __syncthreads();
+        for (int i = 0; i < DOF; i++) {
+            affineMult(
+                baseTransform + i * TPadding, localFirstLinkTransform + i * 12, baseTransform + (i + 1) * TPadding);
+            __syncthreads();
+        }
+    }
+
+    // ---- sphere centers (genSphrTrajKer); element e = (sphere * nPoPerTraj + pose) * 3 + xyz ----
+    const int nTPtsElem = nSpheres * nPoPerTraj * 3;
+    float* centers      = CTRL ? tPts : out + trajIdx * nTPtsElem;
+    for (int e = threadIdx.x; e < nTPtsElem; e += blockDim.x) {
+        const int xyz         = e % 3;
+        const int pose        = (e / 3) % nPoPerTraj;
+        const int sphere      = e / (3 * nPoPerTraj);
+        const int linkIdx     = sphereLink[sphere];
+        const float* T        = tfs + 12 * pose + 12 * (linkIdx * nPoPerTraj);
+        const float* p        = sphereTemplate + sphere * 3;
+        const int multTableIdx = xyz * 4;
+        centers[e] = T[multTableIdx] * p[0] + T[multTableIdx + 1] * p[1] + T[multTableIdx + 2] * p[2]
+                   + T[multTableIdx + 3];
+    }
+
+    if constexpr (CTRL) {
+        __syncthreads();
+        // ---- control points (genCtrlPtsKern), element e = (sphere * nCPts + ctrlPt) * 3 + xyz ----
+        // genCtrlPtsKern: lane t of a group of H sums points t and t + H, then a halving tree reduction; replayed
+        // here serially in the same order (slot t of round `offset` only reads slot t + offset, untouched that round).
+        const int nTPts     = nPoPerTraj;
+        const int nCPtsElem = nSpheres * nCPts * 3;
+        float* cOut         = out + trajIdx * nCPtsElem;
+        for (int e = threadIdx.x; e < nCPtsElem; e += blockDim.x) {
+            const int xyz            = e % 3;
+            const int pointIdxInTraj = (e / 3) % nCPts;
+            const int sphere         = e / (3 * nCPts);
+            const float* g_idata     = tPts + sphere * nTPts * 3;
+            const float* w           = curveSplineWeights + pointIdxInTraj * nTPts;
+            float sdata[H];
+#pragma unroll
+            for (int tid = 0; tid < H; tid++) {
+                float partial   = g_idata[tid * 3 + xyz] * w[tid];
+                const int i2    = tid + H;
+                if (i2 < nTPts) {
+                    partial += g_idata[i2 * 3 + xyz] * w[i2];
+                }
+                sdata[tid] = partial;
+            }
+#pragma unroll
+            for (int offset = H / 2; offset > 0; offset /= 2) {
+#pragma unroll
+                for (int tid = 0; tid < offset; tid++) {
+                    sdata[tid] += sdata[tid + offset];
+                }
+            }
+            cOut[e] = sdata[0];
+        }
+    }
+}
+
+static size_t powOf2Host(size_t v) {
+    size_t p = 1;
+    while (p < v) {
+        p <<= 1;
+    }
+    return p;
+}
+
+size_t fkineSphrTrajSmem(size_t DOF, size_t nPoPerTraj, size_t nSpheres, bool ctrl) {
+    return sizeof(float) * (nPoPerTraj * DOF * 12 + (DOF + 1) * nPoPerTraj * 12 + (ctrl ? nSpheres * nPoPerTraj * 3 : 0));
+}
+
+bool fkineSphrTrajSupported(size_t DOF, size_t nPoPerTraj, size_t nSpheres, size_t nCPts) {
+    const bool ctrl = nCPts > 0;
+    const size_t H  = powOf2Host(nPoPerTraj) / 2;
+    return nPoPerTraj * 12 <= 1024 && fkineSphrTrajSmem(DOF, nPoPerTraj, nSpheres, ctrl) <= 48 * 1024
+        && (!ctrl || (H >= 1 && H <= 256)) && DOF * 12 <= 8 * 12;
+}
+
+template <bool CTRL, int H>
+static void launchFkineSphrTraj(CUdeviceptr qs, const float* sphereTemplate, const int* sphereLink, float* out,
+    size_t DOF, size_t nPoPerTraj, size_t nTraj, size_t nSpheres, size_t nCPts, cudaStream_t stream) {
+    fkineSphrTrajKern<CTRL, H><<<nTraj, nPoPerTraj * 12, fkineSphrTrajSmem(DOF, nPoPerTraj, nSpheres, CTRL), stream>>>(
+        reinterpret_cast<const float*>(qs), sphereTemplate, sphereLink, out, static_cast<int>(DOF),
+        static_cast<int>(nPoPerTraj), static_cast<int>(nSpheres), static_cast<int>(nCPts));
+}
+
+void batchFkineSphrTraj(CUdeviceptr qs, const float* sphereTemplate, const int* sphereLink, float* out, size_t DOF,
+    size_t nPoPerTraj, size_t nTraj, size_t nSpheres, size_t nCPts, cudaStream_t stream) {
+    if (nTraj == 0) {
+        return;
+    }
+    if (nCPts == 0) {
+        launchFkineSphrTraj<false, 1>(qs, sphereTemplate, sphereLink, out, DOF, nPoPerTraj, nTraj, nSpheres, 0, stream);
+        return;
+    }
+    switch (powOf2Host(nPoPerTraj) / 2) {
+#define RTCD_FST_CASE(h)                                                                                               \
+    case h:                                                                                                            \
+        launchFkineSphrTraj<true, h>(                                                                                  \
+            qs, sphereTemplate, sphereLink, out, DOF, nPoPerTraj, nTraj, nSpheres, nCPts, stream);                     \
+        break;
+        RTCD_FST_CASE(1)
+        RTCD_FST_CASE(2)
+        RTCD_FST_CASE(4)
+        RTCD_FST_CASE(8)
+        RTCD_FST_CASE(16)
+        RTCD_FST_CASE(32)
+        RTCD_FST_CASE(64)
+        RTCD_FST_CASE(128)
+        RTCD_FST_CASE(256)
+#undef RTCD_FST_CASE
+    default:
+        break; // callers check fkineSphrTrajSupported() first
+    }
+}
+
 __global__ void genShftCntrAdj(float* TransformArray, float* PointsArray, float* ShiftedPointsArray,
     const size_t nPoses, const int* pointIdxToLinkIdx, const size_t totalPointCount, const size_t DOF) {
     size_t idx_x = blockIdx.x * blockDim.x + threadIdx.x;

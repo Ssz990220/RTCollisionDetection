@@ -7,6 +7,10 @@
 #include <Robot/sweptVolume.cuh>
 #include <Utils/cuda/cudaAlgorithms.cuh>
 #include <memory>
+#ifdef RTCD_CURVE_FUSED_SELFCHECK
+#include <atomic>
+#include <cstring>
+#endif
 // #include <string_view>
 
 namespace RTCD {
@@ -105,12 +109,10 @@ namespace RTCD {
 
     // Refit (OPTIX_BUILD_OPERATION_UPDATE) the curve GAS instead of rebuilding it when the topology (number of
     // trajectories in the batch) is unchanged. Topology (index buffer, primitive count, widths) is identical between
-    // batches; only the vertex positions move.
-#ifndef RTCD_CURVE_REFIT
-#define RTCD_CURVE_REFIT 1
-#endif
+    // batches; only the vertex positions move. When refits happen is a runtime policy
+    // (batchOptixCurveRobot::setRefitPolicy); the GAS is always built refittable so the policy can change freely.
     template <batchRobotConfig CFG>
-    inline constexpr bool curveUseRefit = (RTCD_CURVE_REFIT != 0) && !CFG.useOBB; // OBB path: compacted topology
+    inline constexpr bool curveUseRefit = !CFG.useOBB; // OBB path: compacted topology changes every batch
 
     // GAS build flags of the curve robot. The detector creates the built-in curve IS module with exactly these flags.
     template <batchRobotConfig CFG>
@@ -149,9 +151,14 @@ namespace RTCD {
 
         // Build (or refit, see curveUseRefit) the curve GAS over the first nTraj trajectories of cPointsBuffer.
         void buildCurveGAS(const size_t nTraj);
+        // fkine + sphere centers (+ control points) of nTraj trajectories into cPointsBuffer.
+        void genCurvePoints(const CUdeviceptr poses, const size_t nTraj);
+        bool useFusedKernel = false; // fused single-kernel point generation (if the config fits, see ctor)
 
         curveParam<CFG>& curveCFG;
-        size_t builtNTraj = 0; // nTraj of the last full build (0 = no valid GAS yet)
+        size_t builtNTraj   = 0; // nTraj of the last full build (0 = no valid GAS yet)
+        size_t nRefits      = 0; // refits since the last full build
+        size_t rebuildEvery = 0; // refit policy, see batchOptixCurveRobot::setRefitPolicy
         CUdeviceptr cPointsPtr;
         CUDABuffer cPointsBuffer;
         CUDABuffer tPointsBuffer;
@@ -199,6 +206,15 @@ namespace RTCD {
         const OptixTraversableHandle getHandle(const size_t idx) const override { return robots[idx]->GASHandle; }
 
         void resetGraph() override;
+
+        // Curve GAS refit policy (non-OBB configs). rebuildEvery = 0: refit whenever the batch size is unchanged
+        // (default); 1: full rebuild every batch (pre-refit behaviour); K > 1: full rebuild every K-th build of a
+        // stream, refits in between. Collision results do not depend on it; only build vs. trace cost changes.
+        void setRefitPolicy(const size_t rebuildEvery) {
+            for (auto& r : robots) {
+                r->rebuildEvery = rebuildEvery;
+            }
+        }
 
         // Debugging purpose
         void downloadOBBs(const size_t idx, std::vector<OBB>& obbs);
@@ -266,6 +282,9 @@ namespace RTCD { // Implementation of the streamCurveRobot
 
         preAllocCurveBuffer();
 
+        useFusedKernel = fkineSphrTrajSupported(CFG.DOF, curveCFG.nPoPerTraj, curveCFG.robotTotalSphereCount,
+            CFG.TYPE == LinkType::LINEAR_CURVE ? 0 : CFG.nCtrlPts);
+
         if constexpr (CFG.useOBB) { // overwrite build input
             std::cout << "Using OBB" << std::endl;
             Base::buildInput.curveArray.vertexBuffers = &cPtsCmpPtr;
@@ -308,70 +327,54 @@ namespace RTCD { // Implementation of the streamCurveRobot
     }
 
     template <batchRobotConfig CFG>
-    void streamCurveRobot<CFG>::fkine(const CUdeviceptr poses) {
+    void streamCurveRobot<CFG>::genCurvePoints(const CUdeviceptr poses, const size_t nTraj) {
         using Base = streamGASRobot<CFG>;
-        batchFkineTraj(
-            poses, Base::transformBuffer.d_pointer(), CFG.DOF, curveCFG.nPoPerTraj, curveCFG.nTraj, Base::stream);
-        if constexpr (CFG.useOBB) {
-            if constexpr (CFG.TYPE == LinkType::LINEAR_CURVE) {
-                batchSphrCntrTraj(reinterpret_cast<float*>(Base::transformBuffer.d_pointer()),
-                    reinterpret_cast<float*>(Base::robotPtr->getSphereCenters()),
-                    reinterpret_cast<float*>(cPointsBuffer.d_pointer()), curveCFG.nPoPerTraj, CFG.BATCHSIZE,
-                    reinterpret_cast<int*>(Base::robotPtr->getSphereIdxMap()), curveCFG.robotTotalSphereCount, CFG.DOF,
-                    Base::stream);
-            } else {
-                batchSphrCntrTraj(reinterpret_cast<float*>(Base::transformBuffer.d_pointer()),
-                    reinterpret_cast<float*>(Base::robotPtr->getSphereCenters()),
-                    reinterpret_cast<float*>(tPointsBuffer.d_pointer()), curveCFG.nPoPerTraj, CFG.BATCHSIZE,
-                    reinterpret_cast<int*>(Base::robotPtr->getSphereIdxMap()), curveCFG.robotTotalSphereCount, CFG.DOF,
-                    Base::stream);
+        constexpr size_t nCtrl = CFG.TYPE == LinkType::LINEAR_CURVE ? 0 : CFG.nCtrlPts;
 
-                batchGenControlPoints(reinterpret_cast<float*>(tPointsBuffer.d_pointer()),
-                    reinterpret_cast<float*>(cPointsBuffer.d_pointer()), curveCFG.robotTotalSphereCount * CFG.BATCHSIZE,
-                    Base::stream, CFG.nCtrlPts, CFG.nTrajPts);
+#ifdef RTCD_CURVE_FUSED_SELFCHECK // temporary: compare fused vs. separate kernels bit for bit
+        if (useFusedKernel) {
+            const size_t nFloats = (nCtrl == 0 ? curveCFG.nPoPerTraj : nCtrl) * curveCFG.robotTotalSphereCount * nTraj * 3;
+            useFusedKernel = false;
+            genCurvePoints(poses, nTraj);
+            std::vector<float> ref(nFloats), fused(nFloats);
+            cudaMemcpyAsync(ref.data(), reinterpret_cast<void*>(cPointsBuffer.d_pointer()), nFloats * sizeof(float),
+                cudaMemcpyDeviceToHost, Base::stream);
+            cudaMemsetAsync(reinterpret_cast<void*>(cPointsBuffer.d_pointer()), 0xff, nFloats * sizeof(float), Base::stream);
+            useFusedKernel = true;
+            batchFkineSphrTraj(poses, reinterpret_cast<const float*>(Base::robotPtr->getSphereCenters()),
+                reinterpret_cast<const int*>(Base::robotPtr->getSphereIdxMap()),
+                reinterpret_cast<float*>(cPointsBuffer.d_pointer()), CFG.DOF, curveCFG.nPoPerTraj, nTraj,
+                curveCFG.robotTotalSphereCount, nCtrl, Base::stream);
+            cudaMemcpyAsync(fused.data(), reinterpret_cast<void*>(cPointsBuffer.d_pointer()), nFloats * sizeof(float),
+                cudaMemcpyDeviceToHost, Base::stream);
+            cudaStreamSynchronize(Base::stream);
+            static std::atomic<size_t> nChecked{0}, nBad{0};
+            size_t bad = 0;
+            for (size_t i = 0; i < nFloats; i++) {
+                bad += std::memcmp(&ref[i], &fused[i], sizeof(float)) != 0;
             }
-            updateOBB(CFG.BATCHSIZE);
-        }
-    }
-
-    template <batchRobotConfig CFG>
-    void streamCurveRobot<CFG>::fkine(const CUdeviceptr poses, const size_t nPoses) {
-        using Base = streamGASRobot<CFG>;
-        batchFkineTraj(poses, Base::transformBuffer.d_pointer(), CFG.DOF, curveCFG.nPoPerTraj, nPoses, Base::stream);
-        if constexpr (CFG.useOBB) {
-            if constexpr (CFG.TYPE == LinkType::LINEAR_CURVE) {
-                batchSphrCntrTraj(reinterpret_cast<float*>(Base::transformBuffer.d_pointer()),
-                    reinterpret_cast<float*>(Base::robotPtr->getSphereCenters()),
-                    reinterpret_cast<float*>(cPointsBuffer.d_pointer()), curveCFG.nPoPerTraj, nPoses,
-                    reinterpret_cast<int*>(Base::robotPtr->getSphereIdxMap()), curveCFG.robotTotalSphereCount, CFG.DOF,
-                    Base::stream);
-            } else {
-                batchSphrCntrTraj(reinterpret_cast<float*>(Base::transformBuffer.d_pointer()),
-                    reinterpret_cast<float*>(Base::robotPtr->getSphereCenters()),
-                    reinterpret_cast<float*>(tPointsBuffer.d_pointer()), curveCFG.nPoPerTraj, nPoses,
-                    reinterpret_cast<int*>(Base::robotPtr->getSphereIdxMap()), curveCFG.robotTotalSphereCount, CFG.DOF,
-                    Base::stream);
-
-                batchGenControlPoints(reinterpret_cast<float*>(tPointsBuffer.d_pointer()),
-                    reinterpret_cast<float*>(cPointsBuffer.d_pointer()), curveCFG.robotTotalSphereCount * nPoses,
-                    Base::stream, CFG.nCtrlPts, CFG.nTrajPts);
+            nChecked += nFloats;
+            nBad += bad;
+            if (bad) {
+                std::cout << "FUSED SELFCHECK MISMATCH: " << bad << " of " << nFloats << " floats" << std::endl;
             }
-
-            updateOBB(nPoses);
+            static std::atomic<int> nCalls{0};
+            if ((++nCalls % 256) == 1) {
+                std::cout << "FUSED SELFCHECK: checked " << nChecked << " floats, mismatches " << nBad << std::endl;
+            }
+            return;
         }
-    }
-
-    template <batchRobotConfig CFG>
-    void streamCurveRobot<CFG>::updateAS(const CUdeviceptr poses) {
-        updateAS(poses, CFG.BATCHSIZE);
-    }
-
-    template <batchRobotConfig CFG>
-    void streamCurveRobot<CFG>::updateAS(const CUdeviceptr poses, const size_t nTraj) {
-        using Base = streamGASRobot<CFG>;
+#endif
+        if (useFusedKernel) {
+            // one launch: fkine + sphere centers (+ control points); same values as the 2/3-kernel path below
+            batchFkineSphrTraj(poses, reinterpret_cast<const float*>(Base::robotPtr->getSphereCenters()),
+                reinterpret_cast<const int*>(Base::robotPtr->getSphereIdxMap()),
+                reinterpret_cast<float*>(cPointsBuffer.d_pointer()), CFG.DOF, curveCFG.nPoPerTraj, nTraj,
+                curveCFG.robotTotalSphereCount, nCtrl, Base::stream);
+            return;
+        }
 
         batchFkineTraj(poses, Base::transformBuffer.d_pointer(), CFG.DOF, curveCFG.nPoPerTraj, nTraj, Base::stream);
-
         if constexpr (CFG.TYPE == LinkType::LINEAR_CURVE) {
             // The piece wise linear representation of the curve does not need to compute the control points
             // Hense we store the traj points in cPointsBuffer
@@ -391,7 +394,32 @@ namespace RTCD { // Implementation of the streamCurveRobot
                 reinterpret_cast<float*>(cPointsBuffer.d_pointer()), curveCFG.robotTotalSphereCount * nTraj,
                 Base::stream, CFG.nCtrlPts, CFG.nTrajPts);
         }
+    }
 
+    template <batchRobotConfig CFG>
+    void streamCurveRobot<CFG>::fkine(const CUdeviceptr poses) {
+        fkine(poses, CFG.BATCHSIZE);
+    }
+
+    template <batchRobotConfig CFG>
+    void streamCurveRobot<CFG>::fkine(const CUdeviceptr poses, const size_t nPoses) {
+        using Base = streamGASRobot<CFG>;
+        if constexpr (CFG.useOBB) {
+            genCurvePoints(poses, nPoses);
+            updateOBB(nPoses);
+        } else {
+            batchFkineTraj(poses, Base::transformBuffer.d_pointer(), CFG.DOF, curveCFG.nPoPerTraj, nPoses, Base::stream);
+        }
+    }
+
+    template <batchRobotConfig CFG>
+    void streamCurveRobot<CFG>::updateAS(const CUdeviceptr poses) {
+        updateAS(poses, CFG.BATCHSIZE);
+    }
+
+    template <batchRobotConfig CFG>
+    void streamCurveRobot<CFG>::updateAS(const CUdeviceptr poses, const size_t nTraj) {
+        genCurvePoints(poses, nTraj);
         buildCurveGAS(nTraj);
     }
 
@@ -401,7 +429,8 @@ namespace RTCD { // Implementation of the streamCurveRobot
 
         // A refit keeps the BVH topology of the last full build, so it is only valid for the same primitive set
         // (same nTraj; index buffer and widths never change). Any other nTraj (a partial last batch) rebuilds.
-        const bool refit = curveUseRefit<CFG> && builtNTraj == nTraj;
+        // rebuildEvery: 0 = refit whenever possible, K >= 1 = full rebuild at least every K-th build.
+        const bool refit = curveUseRefit<CFG> && builtNTraj == nTraj && (rebuildEvery == 0 || nRefits + 1 < rebuildEvery);
 
         Base::buildInput.curveArray.numVertices   = curveCFG.nCPtsPerTraj * nTraj;
         Base::buildInput.curveArray.numPrimitives = curveCFG.nSegsPerTraj * nTraj;
@@ -420,7 +449,12 @@ namespace RTCD { // Implementation of the streamCurveRobot
             0 // num emitted properties
             ));
 
-        builtNTraj = nTraj;
+        if (refit) {
+            nRefits++;
+        } else {
+            builtNTraj = nTraj;
+            nRefits    = 0;
+        }
     }
 
     template <batchRobotConfig CFG>
