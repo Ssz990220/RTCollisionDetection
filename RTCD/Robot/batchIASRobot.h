@@ -5,15 +5,7 @@
 #include <Robot/iasRobotKernels.cuh>
 #include <Robot/robot.h>
 #include <Utils/cuda/cudaAlgorithms.cuh>
-#include <cstdlib>
-// Batches with at least this many poses use device stream compaction of the OBB-surviving instances (one D2H count +
-// stream sync per batch, smaller IAS build); smaller batches build over all instances with culled ones masked out
-// (no host round trip). The rule only depends on the host-known nPoses. Set to 0 to always compact, or to a value
-// above BATCHSIZE to never compact. For tuning, the environment variable RTCD_IAS_COMPACT_MIN_POSES (read once, when the
-// robot is constructed) overrides the compiled default.
-#ifndef RTCD_IAS_COMPACT_MIN_POSES
-#define RTCD_IAS_COMPACT_MIN_POSES 256
-#endif
+
 
 namespace RTCD // Batch Robot Classes Declaration
 {
@@ -77,7 +69,11 @@ namespace RTCD // Batch Robot Classes Declaration
         size_t selectTmpSize = 0; // 0 = CUB temp size not yet queried
         uint maskCnt         = 0;
         bool compacted       = false; // whether the last updateWithMask compacted (selects the index map)
-        size_t compactMinPoses = RTCD_IAS_COMPACT_MIN_POSES;
+        // Batches with nPoses >= compactMinPoses stream-compact the OBB-surviving instances (one D2H count + stream
+        // sync per batch, smaller IAS build); smaller batches build over all instances with the culled ones masked out
+        // (no host round trip). The rule depends only on the host-known nPoses. 0 = always compact, a value above
+        // BATCHSIZE = never compact. Default 128: measured crossover on BM_IAS (shelf, RTX 5080).
+        size_t compactMinPoses = 128;
         std::array<OptixInstance, (CFG.DOF + 1) * CFG.BATCHSIZE> instances;
         std::array<std::unique_ptr<optixLink<CFG.BUILD>>, CFG.DOF + 1> batchLinks;
 
@@ -161,6 +157,17 @@ namespace RTCD // Batch Robot Classes Declaration
         const OptixTraversableHandle getHandle(const size_t idx) const override { return batchRobots[idx].IASHandle; }
 
         void resetGraph() override;
+
+        // setCompactMinPoses
+        //
+        // @brief Batches with at least nPoses poses use stream compaction (one host sync per batch); smaller batches use
+        // the sync-free masked IAS. 0 = always compact; > BATCHSIZE = never compact. Default 128.
+        void setCompactMinPoses(const size_t nPoses) {
+            for (auto& r : batchRobots) {
+                r.compactMinPoses = nPoses;
+            }
+        }
+        size_t getCompactMinPoses() const { return batchRobots[0].compactMinPoses; }
 
 #if defined(_DEBUG) || defined(DEBUG)
         void downloadOBB(std::vector<OBB>& obbs, const size_t idx) {
@@ -315,9 +322,6 @@ namespace RTCD // StreamUniqueRobot Implementation
         buildOptions.operation             = OPTIX_BUILD_OPERATION_BUILD;
 
         linkTransformsBuffer.alloc(CFG.BATCHSIZE * (CFG.DOF + 1) * 12 * sizeof(float));
-        if (const char* env = std::getenv("RTCD_IAS_COMPACT_MIN_POSES")) {
-            compactMinPoses = static_cast<size_t>(std::strtoull(env, nullptr, 10));
-        }
         indexMap.alloc(CFG.BATCHSIZE * (CFG.DOF + 1) * sizeof(uint));
         dCount.alloc(sizeof(int));
     }
@@ -382,7 +386,7 @@ namespace RTCD // StreamUniqueRobot Implementation
 
     // updateWithMask (V3)
     //
-    // Batches with nPoses >= compactMinPoses (RTCD_IAS_COMPACT_MIN_POSES) keep the V2.5 scheme (compact surviving instances on the
+    // Batches with nPoses >= compactMinPoses keep the V2.5 scheme (compact surviving instances on the
     // device, read the count back, sync, build over the survivors; returns false if none survive).
     // Smaller batches (masked mode, no stream compaction, no host round trip):
     // The IAS is built over all nPoses * (DOF + 1) instances in their template order (a host-known count), and
