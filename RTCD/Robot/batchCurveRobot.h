@@ -203,13 +203,23 @@ namespace RTCD {
 
         void resetGraph() override;
 
-        // Curve GAS refit policy (non-OBB configs). rebuildEvery = 0: refit whenever the batch size is unchanged
-        // (default); 1: full rebuild every batch (pre-refit behaviour); K > 1: full rebuild every K-th build of a
-        // stream, refits in between. Collision results do not depend on it; only build vs. trace cost changes.
+        // Curve GAS refit policy (non-OBB configs). Collision results do not depend on it; only build vs. trace cost
+        // changes.
+        //  REFIT_AUTO (default): refit while a check has at most refitMaxBatches batches, full rebuild otherwise
+        //      (uses the detector's setBatchCountHint). Measured on the shelf benchmark (RTX 5080): refit wins for
+        //      single-batch checks (build-bound), rebuild wins for multi-batch checks (a refitted BVH keeps the
+        //      topology of unrelated earlier trajectories, so tracing gets slower).
+        //  0: refit whenever the batch size is unchanged; 1: full rebuild every batch;
+        //  K > 1: full rebuild every K-th build of a stream, refits in between.
+        static constexpr size_t REFIT_AUTO      = ~size_t(0);
+        static constexpr size_t refitMaxBatches = 1;
         void setRefitPolicy(const size_t rebuildEvery) {
-            for (auto& r : robots) {
-                r->rebuildEvery = rebuildEvery;
-            }
+            refitPolicy = rebuildEvery;
+            applyRefitPolicy();
+        }
+        void setBatchCountHint(const size_t nBatches) override {
+            batchCountHint = nBatches;
+            applyRefitPolicy();
         }
 
         // Debugging purpose
@@ -217,6 +227,16 @@ namespace RTCD {
 
     private:
         void loadCurveWeight();
+        void applyRefitPolicy() {
+            const size_t rebuildEvery =
+                refitPolicy != REFIT_AUTO ? refitPolicy : (batchCountHint <= refitMaxBatches ? 0 : 1);
+            for (auto& r : robots) {
+                r->rebuildEvery = rebuildEvery;
+            }
+        }
+
+        size_t refitPolicy    = REFIT_AUTO;
+        size_t batchCountHint = 0; // 0 = unknown -> refit in auto mode (single check() of unknown size)
 
     private:
         curveParam<CFG> curveCFG;

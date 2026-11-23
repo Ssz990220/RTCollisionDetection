@@ -43,6 +43,10 @@ namespace RTCD {
 
         virtual void resetGraph() = 0;
 
+        // Hint from the detector: number of batches the upcoming check() will run. Robots may use it to pick a
+        // strategy (the curve robot chooses GAS refit vs. rebuild); default: ignored.
+        virtual void setBatchCountHint(const size_t nBatches) {}
+
         // Getters...
 
         virtual CUdeviceptr getOBBs(const size_t idx) const = 0; // V2.5 API

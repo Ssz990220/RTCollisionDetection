@@ -125,6 +125,8 @@ public:
 
     inline unsigned int getBuildFlags() const { return batchRobot->getBuildFlags(); }
 
+    inline void setBatchCountHint(const size_t nBatches) { batchRobot->setBatchCountHint(nBatches); }
+
     inline size_t getSBTSize() const { return batchRobot->getSBTSize(); }
 
     inline size_t getBatchSize() const { return batchRobot->getBatchSize(); }

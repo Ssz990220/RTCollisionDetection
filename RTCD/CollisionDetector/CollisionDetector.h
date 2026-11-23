@@ -486,6 +486,12 @@ namespace RTCD { // Key Functions
             // }
         }
 
+        if constexpr (TYPE != LinkType::RAY_ONLINE) {
+            if (meshRobot) {
+                meshRobot->setBatchCountHint(batchSizeInfo.size());
+            }
+        }
+
 #ifdef USE_MULTI_THREADING
         task = [&](std::tuple<uint, uint, uint> batchInfo) {
             uint frameId      = std::get<0>(batchInfo);
