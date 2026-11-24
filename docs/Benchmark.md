@@ -62,17 +62,41 @@ Benchmarks are run through MoveIt's FCL interface. Source and setup: [rtcc_bench
 
 ## Plotting benchmark results
 
-Run the RTCD and cuRobo benchmarks first. Install Julia (>= 1.10), then in `scripts/`:
-```julia
-using Pkg
-Pkg.activate(".")
-# Hit "]", the prompt becomes `(scripts) pkg>`
-instantiate # installs the plotting packages; may take a while
-```
-Back in a shell, from the repository root:
+Run the RTCD and cuRobo benchmarks first. The plotting tool is `scripts/Benchmark/plots/plot_benchmarks.py`
+(Python 3.9+, matplotlib >= 3.7, numpy, PyYAML). From the repository root:
 ```bash
-julia -O3 ./scripts/Benchmark/plots/discrete/resultAnalysis.jl   # discrete results
-julia -O3 ./scripts/Benchmark/plots/curve/resultAnalysisEff.jl   # continuous results
+pip install -r scripts/Benchmark/plots/requirements.txt
+python scripts/Benchmark/plots/plot_benchmarks.py --results data/Benchmark/result --out data/Benchmark/Plots
 ```
-They read `data/Benchmark/result/{discrete,curve}/` and write the plots to `data/Benchmark/Plots/{discrete,curve}/`.
-(The Julia scripts were not run as part of the restructuring.)
+(or, without installing anything, `uv run --with matplotlib --with numpy --with pyyaml python scripts/Benchmark/plots/plot_benchmarks.py ...`).
+It reads `data/Benchmark/result/{discrete,curve}/` (the layout `benchmark.sh` / `.bat` write, plus the cuRobo
+YAML files `discrete/kinematics_benchmark_shelf{_dense,,_simple}.yml` and
+`curve/curobo_swept_benchmark_shelf{_dense,,_simple}.yml`) and writes, as PNG, PDF and SVG:
+- `discrete/{DenseShelf,Shelf,ShelfSimple}`, `curve/cur_{denseShelf,shelf,shelfSimple}`: one figure per scene, time
+  per pose / trajectory against batch size with cuRobo and FCL, as in the README (the former Julia figures);
+- `overview_{discrete,curve}`: the three scenes side by side, time per item and the speedup over cuRobo at each
+  batch size (`--reference fcl|none|<series>` picks another reference, e.g. `RobotToObs` or `Linear-16`);
+- `throughput_{discrete,curve}`: checked items per second;
+- `summary_{discrete,curve}.csv`: every plotted number.
+
+The headline ratios (Two-way vs cuRobo / FCL, Linear vs cuRobo) are printed. With `--benchmark_repetitions`, the
+median is plotted (`--stat mean` for the mean) and +-1 standard deviation is drawn as a band. A missing cuRobo
+file, a truncated JSON or failed benchmark rows are reported and skipped. The FCL lines are constants from the
+earlier FCL runs (`FCL_*_US_PER_POSE` in `bench_results.py`). `--note "RTX 4070, Linux, original code"` adds a
+remark to the subtitles, which otherwise show device, stack and date from the JSON `context`; `--methods REGEX`
+and `--all-series` choose the series.
+
+To compare result sets (e.g. two machines, or the code before and after a change), give two or more
+`LABEL=PATH` runs; the first is the reference. A path is a result directory (the layout above, or any directory
+of Google Benchmark JSON) or a single JSON file:
+```bash
+python scripts/Benchmark/plots/plot_benchmarks.py compare --out data/Benchmark/Plots/compare \
+    --run "4070 Linux, original code=data/Benchmark/result" --run "5080 Windows=path/to/result"
+```
+It writes `compare_<kind>_time` (time per item of each series, the runs overlaid), `compare_<kind>_speedup`
+(t(reference) / t(run) at each batch size; above 1 = faster than the reference) and `compare_<kind>.csv`. Series
+are matched by name and scenes by the file layout or the JSON `context` (`--scene` when a JSON file without a
+recorded scene meets a directory of several scenes).
+
+`python scripts/Benchmark/plots/plot_benchmarks.py --self-test` checks the tool on the small synthetic inputs in
+`scripts/Benchmark/plots/testdata/` (no `data/` folder needed).
