@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Runs the collision-checking benchmarks for the three shelf scenes and writes Google Benchmark JSON where the
-# plotting scripts read it (scripts/Benchmark/plots/{discrete,curve}):
+# plotting tool reads it (scripts/Benchmark/plots/plot_benchmarks.py, default --results data/Benchmark/result):
 #   <out>/discrete/{denseShelf,shelf,shelfSimple}.json
 #   <out>/curve/{cur_denseShelf,cur_shelf,cur_shelfSimple}.json
 # Takes a few minutes per executable. Run from the repository root after building.

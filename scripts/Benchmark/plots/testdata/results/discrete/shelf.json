@@ -1,0 +1,13 @@
+{"context": {"date": "2025-02-15T17:57:53-06:00", "host_name": "testhost", "library_version": "v1.6.1"},
+ "benchmarks": [
+  {"name": "BM_IAS/1/real_time", "run_name": "BM_IAS/1/real_time", "run_type": "iteration", "repetitions": 1, "repetition_index": 0, "real_time": 80000.0, "time_unit": "ns"},
+  {"name": "BM_IAS/4/real_time", "run_name": "BM_IAS/4/real_time", "run_type": "iteration", "repetitions": 1, "repetition_index": 0, "real_time": 160000.0, "time_unit": "ns"},
+  {"name": "BM_IAS/16/real_time", "run_name": "BM_IAS/16/real_time", "run_type": "iteration", "repetitions": 1, "repetition_index": 0, "real_time": 320000.0, "time_unit": "ns"},
+  {"name": "BM_IAS/64/real_time", "run_name": "BM_IAS/64/real_time", "run_type": "iteration", "repetitions": 1, "repetition_index": 0, "real_time": 640000.0, "time_unit": "ns"},
+  {"name": "BM_RAY/1/real_time", "run_name": "BM_RAY/1/real_time", "run_type": "iteration", "repetitions": 1, "repetition_index": 0, "real_time": 50000.0, "time_unit": "ns"},
+  {"name": "BM_RAY/4/real_time", "run_name": "BM_RAY/4/real_time", "run_type": "iteration", "repetitions": 1, "repetition_index": 0, "real_time": 100000.0, "time_unit": "ns"},
+  {"name": "BM_RAY/16/real_time", "run_name": "BM_RAY/16/real_time", "run_type": "iteration", "repetitions": 1, "repetition_index": 0, "real_time": 200000.0, "time_unit": "ns"},
+  {"name": "BM_RAY/64/real_time", "run_name": "BM_RAY/64/real_time", "run_type": "iteration", "repetitions": 1, "repetition_index": 0, "real_time": 400000.0, "time_unit": "ns"},
+  {"name": "BM_IAS/256/real_time", "run_name": "BM_IAS/256/real_time", "run_type": "iteration", "repetitions": 1, "repetition_index": 0, "real_time": 0.0, "time_unit": "ns"},
+  {"name": "BM_RAY/256/real_time", "run_name": "BM_RAY/256/real_time", "run_type": "iteration", "repetitions": 1, "repetition_index": 0, "real_time": 1.0, "time_unit": "ns", "error_occurred": true, "error_message": "synthetic failure"}
+]}

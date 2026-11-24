@@ -151,7 +151,8 @@ Tested (the only configuration the library has been built and run on):
   (`cmake/configure_tiny_obj_loader.cmake`).
 
 The Python tools (`scripts/URDFParser`, `scripts/Benchmark/curobo`) need the packages of `requirements.txt`
-(`pip install -r requirements.txt`); the plotting scripts need Julia (`scripts/Project.toml`).
+(`pip install -r requirements.txt`); the benchmark plotting tool needs only matplotlib, numpy and PyYAML
+(`pip install -r scripts/Benchmark/plots/requirements.txt`).
 
 Not tested: Linux (the CMake files still have Linux branches, but the library has never been built there), other
 compilers, Debug builds, other GPUs, other CUDA / OptiX versions (CMake accepts CUDA >= 12.6).
@@ -383,7 +384,7 @@ goldens) and `shelf_dense.json`.
 The Google Benchmark apps `rtcd_bench_discrete` (poses) and `rtcd_bench_curve` (trajectories) time
 `CollisionChecker::checkDevice` on the committed inputs of `tests/data/motions`; the scene is a runtime option
 (`--scene`). The scripts in the repository root run both over the three scenes and write the JSON results to
-`data/Benchmark/result/{discrete,curve}/`, where the plotting scripts read them:
+`data/Benchmark/result/{discrete,curve}/`, where the plotting tool reads them:
 ```bash
 ./benchmark.sh  [--only discrete|curve] [--build <dir>] [--out <dir>] [-- <Google Benchmark args>]   # Linux
 ```
@@ -391,8 +392,13 @@ The Google Benchmark apps `rtcd_bench_discrete` (poses) and `rtcd_bench_curve` (
 .\benchmark.bat [--only discrete|curve] [--build <dir>] [--out <dir>] [--no-pause] ["<GB arg>" ...]
 ```
 On Windows invoke the batch file with a path (`.\benchmark.bat`): PowerShell does not run a script from the
-current directory by its bare name. App options, the cuRobo and FCL comparisons and plotting (Julia):
-**[docs/Benchmark.md](docs/Benchmark.md)**. Running the whole suite takes a while.
+current directory by its bare name. Running the whole suite takes a while. To plot the results (the figures
+above, scene overviews with the speedup over cuRobo, and comparisons between result sets):
+```bash
+python scripts/Benchmark/plots/plot_benchmarks.py --results data/Benchmark/result --out data/Benchmark/Plots
+python scripts/Benchmark/plots/plot_benchmarks.py compare --run "old=<result dir>" --run "new=<result dir>" --out <dir>
+```
+App options, the cuRobo and FCL comparisons and the plotting options: **[docs/Benchmark.md](docs/Benchmark.md)**.
 ## Status
 Measured on Windows, RTX 5080, Release build:
 - **Correctness.** Through the public `CollisionChecker`, the library reproduces all four goldens (recorded with
