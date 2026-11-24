@@ -19,15 +19,14 @@ find_package(OpenGL REQUIRED)
 find_package(urdfdom CONFIG REQUIRED)
 find_package(Eigen3 CONFIG REQUIRED)
 find_package(benchmark REQUIRED)
+find_package(nlohmann_json CONFIG REQUIRED)
 enable_testing()
 find_package(GTest REQUIRED)
 
 include(configCompilerFlags)
 include(configure_tiny_obj_loader)
 include(CUDA_Macros)
-
-include_directories(${CUDA_INCLUDE_DIRS}
-                    ${CMAKE_CURRENT_BINARY_DIR})
+include(RTCDTargets) # helpers of the new tree (rtcd_add_optix_ir, rtcd_add_new_test, ...)
 
 set(PROJECT_PTX_DIR "${CMAKE_BINARY_DIR}/lib/ptx")
 
@@ -39,4 +38,21 @@ configure_file(config.h.in config.h @ONLY)
 
 set(BUILD_TESTS OFF CACHE BOOL "Enable or disable building tests")
 
+# ---- old stack (frozen; reference and same-run performance baseline) ----
+# Its global include directories (RTCD/, 3rdparty/, the build dir for config.h) are set in RTCD/CMakeLists.txt and
+# do not leak into the new tree.
 add_subdirectory(RTCD)
+
+# ---- new stack: include/rtcd (public headers), src/<module>, apps/, tests/ ----
+add_subdirectory(src)
+add_subdirectory(apps)
+if (BUILD_TESTS)
+  add_subdirectory(tests)
+endif()
+
+# AllNew: everything in the new tree (every target registered with rtcd_register_new_target).
+get_property(RTCD_NEW_TARGETS GLOBAL PROPERTY RTCD_NEW_TARGETS)
+add_custom_target(AllNew)
+if (RTCD_NEW_TARGETS)
+  add_dependencies(AllNew ${RTCD_NEW_TARGETS})
+endif()

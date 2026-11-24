@@ -129,6 +129,15 @@ namespace RTCD {
         return buildFlags;
     }
 
+    // Default geometry flag of the curve build input (batchOptixCurveRobot::setGeometryFlags overrides it).
+    // QUAD: OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL, measured 1.3-1.85x faster on the shelf benchmark with
+    // identical collision flags. LINEAR: no measurable change -> NONE. CUBIC: unmeasured -> NONE.
+    template <batchRobotConfig CFG>
+    constexpr unsigned int curveDefaultGeometryFlags() {
+        return CFG.TYPE == LinkType::QUADRATIC_CURVE ? OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL
+                                                     : OPTIX_GEOMETRY_FLAG_NONE;
+    }
+
     template <batchRobotConfig CFG>
     struct streamCurveRobot final : public streamGASRobot<CFG> {
         streamCurveRobot(std::shared_ptr<robot<CFG.DOF>> robotPtr, cudaStream_t stream, OptixDeviceContext context,
@@ -227,7 +236,9 @@ namespace RTCD {
             applyRefitPolicy();
         }
 
-        // Geometry flag of the curve build input (default OPTIX_GEOMETRY_FLAG_NONE). The detector's any-hit program
+        // Geometry flag of the curve build input (default curveDefaultGeometryFlags<CFG>(): single any-hit for QUAD,
+        // OPTIX_GEOMETRY_FLAG_NONE otherwise; pass OPTIX_GEOMETRY_FLAG_NONE to get the old QUAD behaviour). The
+        // detector's any-hit program
         // ignores every intersection and only counts hits per trajectory, so collision flags do not depend on it;
         // OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL disables curve segment splitting (OptiX 9.1 guide, 9.2),
         // which changes BVH build and trace cost and the hit counts. Call before the first check().
@@ -304,7 +315,7 @@ namespace RTCD { // Implementation of the streamCurveRobot
         Base::buildInput.curveArray.indexBuffer          = curveCFG.indexBuffer.d_pointer();
         Base::buildInput.curveArray.indexStrideInBytes   = sizeof(int);
         Base::buildInput.curveArray.numPrimitives        = curveCFG.nSegs;
-        Base::buildInput.curveArray.flag                 = OPTIX_GEOMETRY_FLAG_NONE;
+        Base::buildInput.curveArray.flag                 = curveDefaultGeometryFlags<CFG>();
         Base::buildInput.curveArray.primitiveIndexOffset = 0;
         Base::buildInput.curveArray.endcapFlags          = 1;
 

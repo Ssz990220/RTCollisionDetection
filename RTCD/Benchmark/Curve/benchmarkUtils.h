@@ -65,13 +65,15 @@ void sample_trajectories(
 
 // Optional curve GAS refit policy for benchmarking (see batchOptixCurveRobot::setRefitPolicy):
 // RTCD_BM_REFIT_EVERY=<K> overrides the library default (0 = always refit, 1 = rebuild every batch, K = every K-th).
-// Also applies RTCD_CURVE_GEOM_FLAG (see Benchmark/optixConfigEnv.h).
+// Also applies RTCD_CURVE_GEOM_FLAG if set (see Benchmark/optixConfigEnv.h); unset keeps the library default.
 template <typename CurveRobot>
 void applyBenchmarkRefitPolicy(CurveRobot& robot) {
     if (const char* v = std::getenv("RTCD_BM_REFIT_EVERY")) {
         robot.setRefitPolicy(static_cast<size_t>(std::strtoull(v, nullptr, 10)));
     }
-    robot.setGeometryFlags(benchmarkCurveGeometryFlags());
+    if (const auto flags = benchmarkCurveGeometryFlags()) {
+        robot.setGeometryFlags(*flags);
+    }
 }
 template <int nCPts, int nTPts, int batchSize>
 void BM_LINEAR(benchmark::State& state) {

@@ -1,0 +1,14 @@
+# rtcd_core: CUDA/OptiX context, streams, device buffers, errors, CUDA algorithms (scan, compaction, ...).
+add_library(rtcd_core STATIC
+  placeholder.cu
+)
+target_include_directories(rtcd_core
+  PUBLIC  ${PROJECT_SOURCE_DIR}/include
+  PRIVATE ${PROJECT_SOURCE_DIR}/src)
+# CUDA runtime/driver and the OptiX headers are PUBLIC: every module above needs them in its private code.
+target_link_libraries(rtcd_core PUBLIC
+  CUDA::cudart_static
+  CUDA::cuda_driver
+  OptiX::OptiX)
+set_target_properties(rtcd_core PROPERTIES FOLDER "rtcd")
+rtcd_register_new_target(rtcd_core)

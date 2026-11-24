@@ -14,7 +14,7 @@ SET "exe[1]=benchmarkDenseShelf.exe --benchmark_out=%outputDir%\denseShelf.json"
 SET "exe[2]=benchmarkShelf.exe --benchmark_out=%outputDir%\shelf.json"
 SET "exe[3]=benchmarkShelfSimple.exe --benchmark_out=%outputDir%\shelfSimple.json"
 
-SET "outputDir=.\data\Benchmark\result\discrete"
+SET "outputDir=.\data\Benchmark\result\curve_loop"
 
 :: Check if the output directory exists, create it if it does not
 IF NOT EXIST "%outputDir%" (

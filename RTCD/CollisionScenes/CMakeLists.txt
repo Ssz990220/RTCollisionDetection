@@ -1,7 +1,4 @@
-
-file(GLOB SCENE_CU_SRC "*.cu")
-# cancat SCENE_CU_SRC to CU_SRC which is a global param
-set(CU_SRC ${CU_SRC} ${SCENE_CU_SRC})
+# *.cu are compiled once in rtcd_legacy_kernels (RTCD/CMakeLists.txt)
 
 if (BUILD_TESTS)
 
@@ -19,8 +16,8 @@ if (BUILD_TESTS)
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/Tests
   )
 
-  add_executable(testBatchScene Test/testBatchScene.cpp ${CU_SRC})
-  target_link_libraries(testBatchScene meshes)
+  add_executable(testBatchScene Test/testBatchScene.cpp)
+  target_link_libraries(testBatchScene meshes rtcd_legacy_kernels)
   set_target_properties(testBatchScene PROPERTIES FOLDER "Tests/CollisionScenes")
   set_target_properties(testBatchScene PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/Tests
@@ -29,5 +26,3 @@ if (BUILD_TESTS)
   add_custom_target(AllCollisionSceneTests DEPENDS testObstacle testScene testBatchScene)
 
 endif()
-
-set(CU_SRC ${CU_SRC} PARENT_SCOPE)

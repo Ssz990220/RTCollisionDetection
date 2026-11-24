@@ -1,5 +1,5 @@
 macro(addDemo name src mode)
-    add_executable(${name} ${src} ${CU_SRC} ${UTIL_CUDA_SRC} ../Planner/KNN/knnCUDA.cu)
+    add_executable(${name} ${src})
     target_link_libraries(${name} PRIVATE CollisionDetector)
     set_target_properties(${name} PROPERTIES FOLDER "Demos")
     set_target_properties(${name} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/Demos)
