@@ -203,13 +203,31 @@ TEST_P(CoreTest, BatchLoopOrderStreamMappingAndResults) {
     EXPECT_EQ(perStream[0], (std::vector<std::uint32_t>{0, 3}));
     EXPECT_EQ(perStream[1], (std::vector<std::uint32_t>{1, 4}));
     EXPECT_EQ(perStream[2], (std::vector<std::uint32_t>{2}));
-    // stable staging / hit-count addresses per stream
+    // Packed input: every batch reads its items in place, at the batch's first item of one packed buffer.
+    for (std::size_t k = 0; k < 10; ++k) {
+        const auto& c   = fake->calls[k];
+        const std::size_t check = k / 5; // calls of one check are calls[5 * check .. 5 * check + 4]
+        DevicePtr base  = 0;
+        for (std::size_t j = 5 * check; j < 5 * check + 5; ++j) {
+            if (fake->calls[j].batch == 0) {
+                base = fake->calls[j].items;
+            }
+        }
+        EXPECT_EQ(c.items - base, DevicePtr(c.first) * fpi * sizeof(float)) << "call " << k;
+    }
+    // Hit counters: streams 0 and 1 run two batches per check (different result targets): always their own
+    // buffer, so the same address in both checks. Stream 2 runs batch 2 only: in the second check its target
+    // repeats and it counts straight into the result range, i.e. at another address than in the first check.
+    // (Exact addresses: AddressRulesItemsInPlaceAndDirectHitCounts.)
     for (std::size_t k = 5; k < 10; ++k) {
         const auto& c = fake->calls[k];
         for (std::size_t j = 0; j < 5; ++j) {
-            if (fake->calls[j].streamIndex == c.streamIndex) {
-                EXPECT_EQ(fake->calls[j].items, c.items);
-                EXPECT_EQ(fake->calls[j].hitCounts, c.hitCounts);
+            if (fake->calls[j].batch == c.batch) {
+                if (c.streamIndex == 2) {
+                    EXPECT_NE(fake->calls[j].hitCounts, c.hitCounts);
+                } else {
+                    EXPECT_EQ(fake->calls[j].hitCounts, c.hitCounts);
+                }
             }
         }
     }
@@ -317,8 +335,18 @@ TEST_P(CoreTest, ParamUploadCache) {
     o.addValue = 2;
     auto core  = makeCore(o, &fake);
     const auto in = items(kMaxItems, times3);
+    // The fake's params hold the items pointer. Packed items are read in place (a different pointer per batch),
+    // so this test uses STRIDED device items: they go through each stream's staging buffer (one pointer per
+    // stream). Two batches per stream into different result targets keep the hit counters in the stream's own
+    // buffer too, so the params are identical per stream.
+    const std::size_t stride = fpi + 1;
+    const auto strided       = items(kMaxItems, times3, stride);
+    DeviceBuffer dItems      = DeviceBuffer::fromHost(std::span<const float>(strided));
+    DeviceBuffer dHits(std::size_t(kMaxItems) * sizeof(std::uint32_t));
     auto expectOk = [&](std::uint32_t n) {
-        const auto c = counts(*core, in, n);
+        core->checkDevice(DeviceItems{dItems.ptr(), n, stride}, DeviceSpan<std::uint32_t>{dHits.ptr(), n});
+        std::vector<std::uint32_t> c(n);
+        dHits.download(c.data(), c.size() * sizeof(std::uint32_t));
         for (std::uint32_t i = 0; i < n; ++i) {
             EXPECT_EQ(c[i], 3 * i + 3) << "n " << n << " item " << i;
         }
@@ -553,6 +581,165 @@ TEST_P(CoreTest, CheckDeviceAndStridedInput) {
 }
 
 // ---------------------------------------------------------------------------------------------------------------
+// BatchView address rules (relaxed 2026-11-24, rtcd/backend.h): items read in place when the input is packed,
+// hit counters counted straight into the result range when a stream's previous batch had the same target,
+// single-batch checks on the calling thread. Results must be right in every combination.
+// ---------------------------------------------------------------------------------------------------------------
+
+TEST_P(CoreTest, AddressRulesItemsInPlaceAndDirectHitCounts) {
+    for (const bool graph : {false, true}) {
+        SCOPED_TRACE(graph ? "graph replay (capturable backend)" : "direct prepare()");
+        FakeBackend* fake = nullptr;
+        FakeOptions o;
+        o.addValue            = 5;
+        o.capturableThreshold = graph ? 1u : ~0u;
+        auto core             = makeCore(o, &fake);
+        const std::size_t fpiBytes = std::size_t(fpi) * sizeof(float);
+
+        // two input buffers (different contents) and two result buffers, all caller-owned device memory
+        const auto hostA = items(kMaxItems, plus100);
+        const auto hostB = items(kMaxItems, times3);
+        DeviceBuffer inA = DeviceBuffer::fromHost(std::span<const float>(hostA));
+        DeviceBuffer inB = DeviceBuffer::fromHost(std::span<const float>(hostB));
+        DeviceBuffer r0(std::size_t(kMaxItems) * sizeof(std::uint32_t)), r1(std::size_t(kMaxItems) * sizeof(std::uint32_t));
+        auto expected = [&](bool a, std::uint32_t i) { return (a ? 100 + i : 3 * i + 1) + 5; };
+        auto checkInto = [&](bool a, DeviceBuffer& r, std::uint32_t n, const char* what) {
+            const std::vector<std::uint32_t> junk(kMaxItems, 0xdeadbeefu);
+            r.upload(junk.data(), junk.size() * sizeof(std::uint32_t)); // the check must zero what it writes
+            const std::size_t before = fake->calls.size();
+            core->checkDevice(DeviceItems{(a ? inA : inB).ptr(), n, 0}, DeviceSpan<std::uint32_t>{r.ptr(), n});
+            std::vector<std::uint32_t> out(kMaxItems);
+            r.download(out.data(), out.size() * sizeof(std::uint32_t));
+            for (std::uint32_t i = 0; i < n; ++i) {
+                EXPECT_EQ(out[i], expected(a, i)) << what << ": n " << n << " item " << i;
+            }
+            for (std::uint32_t i = n; i < kMaxItems; ++i) {
+                EXPECT_EQ(out[i], 0xdeadbeefu) << what << ": written past n at " << i;
+            }
+            return before; // index of this check's first prepare() call (graph replays add none)
+        };
+
+        // (1) single batch, repeated into the SAME result buffer: the first check uses the stream's own counters,
+        // later ones count into r0 itself; the check runs on the calling thread in both dispatch modes.
+        for (int rep = 0; rep < 3; ++rep) {
+            const std::size_t k = checkInto(rep != 1, r0, 3, "single batch, same buffer");
+            if (!graph || rep < 2) { // graph: rep 0 captures (own counters), rep 1 captures (r0), rep 2 replays
+                ASSERT_EQ(fake->calls.size(), k + 1) << "rep " << rep;
+                const auto& c = fake->calls[k];
+                EXPECT_EQ(c.thread, std::this_thread::get_id()) << "a single-batch check runs on the caller";
+                if (rep == 0) {
+                    EXPECT_NE(c.hitCounts, r0.ptr()) << "first check into r0: the stream's own counters";
+                } else {
+                    EXPECT_EQ(c.hitCounts, r0.ptr()) << "repeated target: counted into the result directly";
+                }
+                if (graph) {
+                    EXPECT_NE(c.items, inA.ptr()) << "graph batches read the staging buffer";
+                } else {
+                    EXPECT_EQ(c.items, (rep != 1 ? inA : inB).ptr()) << "packed input is read in place";
+                }
+            } else {
+                EXPECT_EQ(fake->calls.size(), k) << "replayed graph (stream 0, 3 items, r0)";
+            }
+        }
+        // (2) alternating result buffers r1 r0 r1 r0 r1 (after r0) and input buffers: the target never repeats ->
+        // own counters, still right. Ends on r1, so (3) starts with a new target on stream 0.
+        for (int rep = 0; rep < 5; ++rep) {
+            const std::size_t k = checkInto(rep % 3 == 0, rep % 2 == 0 ? r1 : r0, 3, "single batch, alternating");
+            for (std::size_t j = k; j < fake->calls.size(); ++j) {
+                EXPECT_NE(fake->calls[j].hitCounts, r0.ptr());
+                EXPECT_NE(fake->calls[j].hitCounts, r1.ptr());
+            }
+        }
+        // (3) multi-batch: 23 items = batches 0..4 on streams 0 1 2 0 1; streams 0 and 1 run two batches each
+        // (targets alternate -> own counters), stream 2 one (direct from the second check into the same buffer on)
+        for (int rep = 0; rep < 4; ++rep) {
+            const bool same = rep >= 1 && rep <= 2; // reps 1, 2 repeat rep 0's buffer; rep 3 switches
+            const std::size_t k = checkInto(rep % 2 == 0, rep == 3 ? r1 : r0, 23, "multi batch");
+            for (std::size_t j = k; j < fake->calls.size(); ++j) {
+                const auto& c = fake->calls[j];
+                const DevicePtr target = (rep == 3 ? r1 : r0).ptr() + DevicePtr(c.first) * sizeof(std::uint32_t);
+                if (c.streamIndex == 2 && same) {
+                    EXPECT_EQ(c.hitCounts, target) << "rep " << rep << " batch " << c.batch;
+                } else {
+                    EXPECT_NE(c.hitCounts, target) << "rep " << rep << " batch " << c.batch;
+                }
+                if (!graph) {
+                    EXPECT_EQ(c.items, (rep % 2 == 0 ? inA : inB).ptr() + DevicePtr(c.first) * fpiBytes);
+                }
+            }
+        }
+        // (4) strided input always goes through the staging buffer
+        {
+            const std::size_t stride = fpi + 2;
+            const auto strided       = items(kMaxItems, plus100, stride);
+            DeviceBuffer inS         = DeviceBuffer::fromHost(std::span<const float>(strided));
+            for (int rep = 0; rep < 2; ++rep) {
+                const std::size_t k = fake->calls.size();
+                core->checkDevice(DeviceItems{inS.ptr(), 23, stride}, DeviceSpan<std::uint32_t>{r0.ptr(), 23});
+                std::vector<std::uint32_t> out(23);
+                r0.download(out.data(), out.size() * sizeof(std::uint32_t));
+                for (std::uint32_t i = 0; i < 23; ++i) {
+                    EXPECT_EQ(out[i], 105 + i) << "strided item " << i;
+                }
+                ASSERT_EQ(fake->calls.size(), k + 5); // strided: never replayed
+                for (std::size_t j = k; j < fake->calls.size(); ++j) {
+                    const DevicePtr p = fake->calls[j].items;
+                    EXPECT_TRUE(p < inS.ptr() || p >= inS.ptr() + inS.size()) << "strided items must be staged";
+                }
+            }
+        }
+        // (5) host check() interleaved with device checks into the same / other buffers
+        for (int rep = 0; rep < 3; ++rep) {
+            const auto ch = counts(*core, hostA, 23);
+            for (std::uint32_t i = 0; i < 23; ++i) {
+                EXPECT_EQ(ch[i], expected(true, i)) << "host check rep " << rep << " item " << i;
+            }
+            const auto c1 = counts(*core, hostB, 4);
+            for (std::uint32_t i = 0; i < 4; ++i) {
+                EXPECT_EQ(c1[i], expected(false, i)) << "host single batch rep " << rep << " item " << i;
+            }
+            checkInto(rep % 2 == 1, r0, 4, "device between host checks");
+        }
+    }
+}
+
+TEST_P(CoreTest, AddressRulesAfterAFailedCheck) {
+    for (const bool graph : {false, true}) {
+        SCOPED_TRACE(graph ? "graph replay" : "direct prepare()");
+        FakeBackend* fake = nullptr;
+        FakeOptions o;
+        o.addValue            = 1;
+        o.throwAtBatch        = 4; // checks with >= 21 items fail at batch 4 (stream 1)
+        o.capturableThreshold = graph ? 1u : ~0u;
+        auto core             = makeCore(o, &fake);
+        const auto host       = items(kMaxItems, times3);
+        DeviceBuffer in       = DeviceBuffer::fromHost(std::span<const float>(host));
+        DeviceBuffer r(std::size_t(kMaxItems) * sizeof(std::uint32_t));
+        auto ok = [&](std::uint32_t n) {
+            core->checkDevice(DeviceItems{in.ptr(), n, 0}, DeviceSpan<std::uint32_t>{r.ptr(), n});
+            std::vector<std::uint32_t> out(n);
+            r.download(out.data(), out.size() * sizeof(std::uint32_t));
+            for (std::uint32_t i = 0; i < n; ++i) {
+                EXPECT_EQ(out[i], 3 * i + 2) << "n " << n << " item " << i;
+            }
+        };
+        ok(15); // batches 0 1 2 (one per stream)
+        ok(15); // all three now count into r directly
+        EXPECT_THROW(core->checkDevice(DeviceItems{in.ptr(), 23, 0}, DeviceSpan<std::uint32_t>{r.ptr(), 23}), InvalidArgument);
+        for (const StreamContext& s : core->streams()) {
+            EXPECT_EQ(cudaStreamQuery(s.stream), cudaSuccess) << "stream " << s.index << " not drained";
+        }
+        ok(15);
+        ok(3);
+        ok(15);
+        const auto c = counts(*core, host, 20);
+        for (std::uint32_t i = 0; i < 20; ++i) {
+            EXPECT_EQ(c[i], 3 * i + 2) << "host item " << i;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
 // CheckerConfig::graphPrepare + Backend::prepareCapturable: zero / staging copy / prepare() replayed as a CUDA graph
 // ---------------------------------------------------------------------------------------------------------------
 
@@ -563,7 +750,10 @@ TEST_P(CoreTest, GraphPrepareCapturesOncePerStreamAndItemCount) {
     o.capturableThreshold = 1;
     ASSERT_TRUE(cfg.graphPrepare); // default on
     auto core = makeCore(o, &fake);
-    const std::uint32_t n = 23; // batches 5 5 5 5 3 on streams 0 1 2 0 1: graphs (0,5) (1,5) (2,5) (1,3)
+    // batches 5 5 5 5 3 on streams 0 1 2 0 1: graphs (0,5) (1,5) (2,5) (1,3) with the streams' own hit counters,
+    // plus (2,5) counting into the result range from the second check on (stream 2's only batch repeats its
+    // target), i.e. one graph per (stream, item count, hit-count address)
+    const std::uint32_t n = 23;
     for (int rep = 0; rep < 3; ++rep) {
         const auto in = items(n, rep == 1 ? times3 : plus100); // new contents in the same buffers
         const auto c  = counts(*core, in, n);
@@ -573,7 +763,7 @@ TEST_P(CoreTest, GraphPrepareCapturesOncePerStreamAndItemCount) {
         EXPECT_EQ(core->lastStats().batches, 5u);
         EXPECT_EQ(core->lastStats().launches, 5u);
     }
-    EXPECT_EQ(fake->calls.size(), 4u) << "prepare() must run once per (stream, item count), at capture";
+    EXPECT_EQ(fake->calls.size(), 5u) << "prepare() must run once per (stream, item count, hits), at capture";
     EXPECT_EQ(fake->begins.size(), 3u); // beginCheck still once per check
 
     // device items at another address: the staging-copy node is re-pointed
@@ -593,7 +783,7 @@ TEST_P(CoreTest, GraphPrepareCapturesOncePerStreamAndItemCount) {
     for (std::uint32_t i = 0; i < n; ++i) {
         EXPECT_EQ(cs[i], 107 + i);
     }
-    EXPECT_EQ(fake->calls.size(), 4u);
+    EXPECT_EQ(fake->calls.size(), 5u); // other targets: back to the (2,5) graph with the own counters
     // strided DEVICE items take the direct path (prepare() called for every batch)
     DeviceBuffer dStrided = DeviceBuffer::fromHost(std::span<const float>(strided));
     core->checkDevice(DeviceItems{dStrided.ptr(), n, stride}, DeviceSpan<std::uint32_t>{dHits.ptr(), n});
@@ -601,7 +791,7 @@ TEST_P(CoreTest, GraphPrepareCapturesOncePerStreamAndItemCount) {
     for (std::uint32_t i = 0; i < n; ++i) {
         EXPECT_EQ(out[i], 107 + i) << "strided device item " << i;
     }
-    EXPECT_EQ(fake->calls.size(), 4u + 5u);
+    EXPECT_EQ(fake->calls.size(), 5u + 5u);
 
     // graphPrepare = false: prepare() every batch
     CheckerConfig off = cfg;

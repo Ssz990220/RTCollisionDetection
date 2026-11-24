@@ -6,12 +6,12 @@
 //
 //     backend.beginCheck(info)                                  // once per check, host only
 //     for batch b (on stream s = b % numStreams, in batch order per stream):
-//         core: zero stream s's hit-count buffer                           (BatchView::hitCounts)
-//         core: copy the batch's items into stream s's staging buffer      (BatchView::items)
+//         core: zero the batch's hit counters        (BatchView::hitCounts: stream s's buffer or the result range)
+//         core: copy the items into stream s's staging buffer (BatchView::items), unless they are read in place
 //         plan = backend.prepare(streams[s], batch)                        // per batch
 //         core: upload plan.params (skipped if byte-identical to stream s's last upload), optixLaunch(...)
 //               unless plan.launch == false
-//         core: copy hitCounts into the check result at batch.firstItem
+//         core: copy hitCounts into the check result at batch.firstItem, unless counted there directly
 //     core: synchronize the checker's streams
 //
 // There are no mode branches in that loop; everything mode-specific is inside prepare() and the programs.
@@ -120,13 +120,19 @@ namespace rtcd {
         std::uint32_t batchIndex = 0; // b
         std::uint32_t firstItem  = 0; // b * maxBatchSize: index of the batch's first item in the check
         std::uint32_t itemCount  = 0; // 1 .. maxBatchSize (only the last batch may be partial)
-        // The batch's items, packed (stride = ItemLayout::floatsPerItem), in this stream's staging buffer:
-        // itemCount * floatsPerItem floats. The address is the same for every batch of a stream (stable).
+        // The batch's items, packed (stride = ItemLayout::floatsPerItem): itemCount * floatsPerItem floats, valid
+        // and unchanged until the check returns. Either this stream's staging buffer (always for batches replayed
+        // as a graph, see prepareCapturable(), and for strided input) or, when the check's input is packed, the
+        // check's input itself at the batch's first item (no staging copy). The address may differ from batch to
+        // batch: read it from every BatchView, never cache it across prepare() calls.
         DeviceSpan<const float> items;
         // Per-item hit counters of this batch, uint32, itemCount entries, ZEROED by the core before prepare() on
         // the same stream. This is the ONLY result location: the backend's programs must add the hits of item i
         // (0 <= i < itemCount, batch-local) to hitCounts[i] with atomicAdd; item i collides iff hitCounts[i] > 0
-        // after the launch. Stable address per stream; capacity maxBatchSize entries.
+        // after the launch. Either this stream's own counter buffer (the core then copies it into the check's
+        // result) or the check's result range at firstItem itself (the core does this when the stream's previous
+        // batch targeted the same address, so params holding the pointer stay byte-identical across repeated
+        // checks into one result buffer). The address may differ between batches: read it from every BatchView.
         DeviceSpan<std::uint32_t> hitCounts;
     };
 
@@ -199,11 +205,12 @@ namespace rtcd {
     //   true iff prepare() for a batch of that item count
     //     (a) enqueues only plain CUDA work on its stream: kernels, memset / memcpy (no OptiX API call of any
     //         kind, no host synchronization, no device allocation), and
-    //     (b) returns a LaunchPlan and params that depend only on (stream index, itemCount),
+    //     (b) returns a LaunchPlan and params that depend only on (stream index, itemCount, batch.hitCounts.ptr),
     //   so that replaying the captured work (stream capture -> CUDA graph) is equivalent to calling prepare() again
     //   on new contents of the same buffers. true implies !synchronizesHost(itemCount) (the core checks it).
     //   With CheckerConfig::graphPrepare the core then captures "zero hits, staging copy, prepare()" once per
-    //   (stream, itemCount) and replays it with one cudaGraphLaunch per batch instead of calling prepare().
+    //   (stream, itemCount, hitCounts address) and replays it with one cudaGraphLaunch per batch instead of
+    //   calling prepare() (items of such batches are always in the stream's staging buffer).
     //   HARD RULE: no OptiX call inside a stream capture. Measured on OptiX 9.1 / driver 610.88
     //   (tests/experiments/graph_capture): optixLaunch and optixAccelBuild inside a capture are silently dropped
     //   from the graph (only a 64-byte param memcpy, resp. nothing or part of the build, is recorded; the replay

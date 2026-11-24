@@ -26,8 +26,7 @@ namespace rtcd::detail {
         BeginCheck,    // counters reset + backend.beginCheck
         Dispatch,      // mark only: right before the batches are issued (workers woken / inline loop)
         Joined,        // all workers returned (StreamWorkers::run returned); inline: the batch loop ended
-        SyncUsed,      // cudaStreamSynchronize of the streams that ran batches of this check
-        SyncIdle,      // cudaStreamSynchronize of the checker's other streams
+        SyncUsed,      // cudaStreamSynchronize of the streams that ran batches of this check (the only ones synced)
         SyncProbe,     // diagnostic only (PhaseTrace::probeIdleSync): the same synchronization again, on idle streams
         Stats,         // stats gathered
         Download,      // checkHost: counters -> pinned host buffer
@@ -48,7 +47,7 @@ namespace rtcd::detail {
 
     inline const char* phaseName(Phase p) {
         static constexpr std::array<const char*, static_cast<std::size_t>(Phase::Count)> names{"call", "entry",
-            "upload", "begin_check", "dispatch", "joined", "sync_used", "sync_idle", "sync_probe", "stats",
+            "upload", "begin_check", "dispatch", "joined", "sync_used", "sync_probe", "stats",
             "download", "flags", "return", "batch_start", "zero", "staging", "prepare", "graph_launch", "params",
             "launch", "result_copy", "batch_end"};
         return names[static_cast<std::size_t>(p)];

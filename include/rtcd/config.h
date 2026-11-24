@@ -158,7 +158,9 @@ namespace rtcd {
         ThreadPerStream, // "thread_per_stream": one persistent worker thread per stream issues that stream's
                          //                  batches in order (old USE_MULTI_THREADING, used by the regression and
                          //                  the benchmarks). Lets a host sync on one stream (IAS compaction, curve
-                         //                  OBB) overlap work issued on the others.
+                         //                  OBB) overlap work issued on the others. A check with a single batch has
+                         //                  nothing to overlap and is issued on the calling thread (no worker
+                         //                  wake-up / join: 6-18 us per check measured on Windows).
     };
 
     struct CheckerConfig {

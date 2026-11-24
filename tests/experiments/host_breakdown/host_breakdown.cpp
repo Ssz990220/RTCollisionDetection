@@ -11,9 +11,10 @@
 //   rtcd_exp_host_breakdown [--modes mesh,ray,linear,quad] [--n 1,16] [--reps 2000] [--warmup 300]
 //                           [--path device|host|both] [--dispatch thread|single] [--probe-sync 0|1]
 //                           [--override path=value,...]   (rtcd::applyOverrides on every checker config)
-//                           [--variants default/inline=1,syncused=1/...] [--tables 0|1]
-// Variants (DetectorCore::Tuning, '/'-separated) are alternated rep by rep in this process on the same items; each
-// variant's flags are compared with the first variant's every repetition (reported as "flag mismatches").
+//                           [--variants "<overrides>/<overrides>/..."] [--tables 0|1]
+// Variants ('/'-separated override texts, e.g. "graph_prepare=true/graph_prepare=false"; an empty one = the mode's
+// config) get one checker each and are alternated rep by rep in this process on the same items; each variant's
+// flags are compared with the first checker run of that repetition (reported as "flag mismatches").
 // Output: one table per (mode, path, N): phase, median, p10, p90 [us], and the share of the median total.
 #include "detector/backend_factory.h"
 #include "detector/detector_core.h"
@@ -65,31 +66,10 @@ namespace {
         bool probeSync = true;
         std::string overrides;
         bool tables = true;
-        struct Variant {
-            std::string name;
-            detail::DetectorCore::Tuning tuning;
-        };
-        std::vector<Variant> variants{{"default", {}}};
+        // Each variant = extra rtcd::applyOverrides text on top of the mode's config ("" = as is); one checker per
+        // variant, all alternated rep by rep.
+        std::vector<std::string> variants{""};
     };
-
-    // "inline=1,syncused=1,pinned=1,joinspin=200,wakespin=50" -> Tuning (unnamed keys stay default)
-    detail::DetectorCore::Tuning parseTuning(const std::string& spec) {
-        detail::DetectorCore::Tuning t;
-        for (const std::string& kv : split(spec)) {
-            const auto eq = kv.find('=');
-            const std::string k = kv.substr(0, eq);
-            const std::uint32_t v = eq == std::string::npos ? 1u : std::uint32_t(std::stoul(kv.substr(eq + 1)));
-            if (k == "inline") t.inlineSingleBatch = v != 0;
-            else if (k == "syncused") t.syncUsedOnly = v != 0;
-            else if (k == "pinned") t.hostResultsToPinned = v != 0;
-            else if (k == "joinspin") t.joinSpinUs = v;
-            else if (k == "wakespin") t.wakeSpinUs = v;
-            else if (k == "dhits") t.directHits = v != 0;
-            else if (k == "ditems") t.directItems = v != 0;
-            else if (k != "default" && !k.empty()) throw std::runtime_error("unknown tuning key " + k);
-        }
-        return t;
-    }
 
     struct ModeSetup {
         CheckerConfig cfg;
@@ -233,9 +213,11 @@ int main(int argc, char** argv) {
         else if (a == "--override") o.overrides = v;
         else if (a == "--tables") o.tables = v != "0";
         else if (a == "--variants") {
-            // "default/inline=1/inline=1,syncused=1": alternated in one process; flags compared to the first one
             o.variants.clear();
-            for (const std::string& spec : split(v, '/')) o.variants.push_back({spec, parseTuning(spec)});
+            std::stringstream ss(v);
+            std::string t;
+            while (std::getline(ss, t, '/')) o.variants.push_back(t);
+            if (o.variants.empty()) o.variants.push_back("");
         }
         else {
             std::cerr << "unknown option " << a << "\n";
@@ -252,16 +234,23 @@ int main(int argc, char** argv) {
 
         for (const std::string& m : o.modes) {
             ModeSetup ms = modeSetup(m, o);
-            detail::DetectorCoreDesc d;
-            d.context = ctx;
-            d.config  = ms.cfg.resolved();
-            d.dof     = robot->dof();
-            d.lowerLimits.assign(robot->lowerLimits().begin(), robot->lowerLimits().end());
-            d.upperLimits.assign(robot->upperLimits().begin(), robot->upperLimits().end());
-            d.robot         = robot;
-            d.scene         = scene;
-            d.createBackend = &detail::createBackendForMode;
-            detail::DetectorCore core(std::move(d));
+            std::vector<std::unique_ptr<detail::DetectorCore>> cores;
+            for (const std::string& variant : o.variants) {
+                CheckerConfig c = ms.cfg;
+                if (!variant.empty()) applyOverrides(c, variant);
+                detail::DetectorCoreDesc d;
+                d.context = ctx;
+                d.config  = c.resolved();
+                d.dof     = robot->dof();
+                d.lowerLimits.assign(robot->lowerLimits().begin(), robot->lowerLimits().end());
+                d.upperLimits.assign(robot->upperLimits().begin(), robot->upperLimits().end());
+                d.robot         = robot;
+                d.scene         = scene;
+                d.createBackend = &detail::createBackendForMode;
+                cores.push_back(std::make_unique<detail::DetectorCore>(std::move(d)));
+                cores.back()->warmup();
+            }
+            detail::DetectorCore& core = *cores[0];
             const std::uint32_t S = core.config().numStreams;
             const std::size_t fpi = core.itemLayout().floatsPerItem();
             const std::vector<float> pool =
@@ -271,7 +260,6 @@ int main(int argc, char** argv) {
             DeviceBuffer items(core.config().maxItemsPerCheck * fpi * sizeof(float));
             DeviceBuffer counts(core.config().maxItemsPerCheck * sizeof(std::uint32_t));
             std::vector<std::uint8_t> flags(core.config().maxItemsPerCheck);
-            core.warmup();
 
             PhaseTrace trace;
             trace.probeIdleSync = o.probeSync;
@@ -296,19 +284,19 @@ int main(int argc, char** argv) {
                         for (std::size_t j = 0; j < 2 * V; ++j) {
                             const std::size_t v = (j / 2 + std::size_t(r)) % V;
                             const bool traced   = (j & 1) == 0;
-                            core.setTuning(o.variants[v].tuning);
+                            detail::DetectorCore& cv = *cores[v];
                             trace.reset(S);
-                            core.setPhaseTrace(traced ? &trace : nullptr);
+                            cv.setPhaseTrace(traced ? &trace : nullptr);
                             const auto t0 = std::chrono::steady_clock::now();
                             if (traced) trace.mark(0, Phase::Call);
                             if (path == "device") {
-                                core.checkDevice(DeviceItems{items.ptr(), n, 0}, DeviceSpan<std::uint32_t>{counts.ptr(), n});
+                                cv.checkDevice(DeviceItems{items.ptr(), n, 0}, DeviceSpan<std::uint32_t>{counts.ptr(), n});
                             } else {
-                                core.checkHost(HostItems{host, n, 0}, std::span<std::uint8_t>(flags).first(n), {});
+                                cv.checkHost(HostItems{host, n, 0}, std::span<std::uint8_t>(flags).first(n), {});
                             }
                             if (traced) trace.mark(0, Phase::Return);
                             const auto t1 = std::chrono::steady_clock::now();
-                            core.setPhaseTrace(nullptr);
+                            cv.setPhaseTrace(nullptr);
                             // flags of every variant against the first variant's on the same items (untimed)
                             if (path == "device") {
                                 counts.download(dl.data(), n * sizeof(std::uint32_t));
@@ -327,18 +315,18 @@ int main(int argc, char** argv) {
                         std::ostringstream title;
                         title << m << " " << (path == "device" ? "checkDevice" : "checkHost") << " N=" << n << " ("
                               << S << " streams, batch " << core.config().maxBatchSize << ", dispatch " << o.dispatch
-                              << ", " << o.reps << " reps) variant [" << o.variants[v].name << "]";
+                              << ", " << o.reps << " reps) variant [" << (o.variants[v].empty() ? "as configured" : o.variants[v]) << "]";
                         if (o.tables) {
                             printTable(title.str(), s[v], pct(untraced[v], 0.5), pct(untraced[v], 0.1), pct(untraced[v], 0.9));
                         }
                     }
                     std::printf("\n-- summary %s %s N=%zu: untraced total median [p10, p90] us; flag mismatches vs "
-                                "variant 0: %zu\n",
+                                "first run: %zu\n",
                         m.c_str(), path.c_str(), n, flagMismatches);
                     const double base = pct(untraced[0], 0.5);
                     for (std::size_t v = 0; v < V; ++v) {
                         const double med = pct(untraced[v], 0.5);
-                        std::printf("   %-40s %9.2f [%8.2f, %8.2f]  %+7.2f us  (%.3f x)\n", o.variants[v].name.c_str(), med,
+                        std::printf("   %-40s %9.2f [%8.2f, %8.2f]  %+7.2f us  (%.3f x)\n", (o.variants[v].empty() ? "as configured" : o.variants[v].c_str()), med,
                             pct(untraced[v], 0.1), pct(untraced[v], 0.9), med - base, base > 0 ? med / base : 0.0);
                     }
                     std::fflush(stdout);

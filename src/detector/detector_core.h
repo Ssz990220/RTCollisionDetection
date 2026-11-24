@@ -66,7 +66,8 @@ namespace rtcd::detail {
         ItemLayout itemLayout() const noexcept { return layout_; }
         Backend& backend() noexcept { return *backend_; }
         std::span<const StreamContext> streams() const noexcept { return streamCtx_; }
-        // Thread that runs the batches of stream s: a worker (ThreadPerStream) or the caller (SingleThread, id()).
+        // Thread that runs the multi-batch checks' batches of stream s: a worker (ThreadPerStream) or the caller
+        // (SingleThread, id()). A single-batch check always runs on the calling thread.
         std::thread::id workerThreadId(std::uint32_t s) const;
 
         // collides.size() >= items.count; hitCounts empty or >= items.count.
@@ -79,25 +80,13 @@ namespace rtcd::detail {
         // The trace must have been reset() for this checker's stream count and outlive the checks it records.
         void setPhaseTrace(PhaseTrace* trace) noexcept { trace_ = trace; }
 
-        // Development switches for same-process A/B measurements (Track G2). Defaults = library behaviour.
-        struct Tuning {
-            bool inlineSingleBatch    = false; // ThreadPerStream: a 1-batch check runs on the calling thread
-            bool syncUsedOnly         = false; // synchronize only the streams that ran batches of the check
-            bool hostResultsToPinned  = false; // checkHost: batches copy their counts straight into the pinned buffer
-            std::uint32_t joinSpinUs  = 0;     // caller spins this long for the workers before blocking
-            std::uint32_t wakeSpinUs  = 0;     // workers spin this long for the next job before blocking
-            bool directHits           = false; // count into the result range when its address repeats
-            bool directItems          = false; // non-graph packed batches read the items in place
-        };
-        void setTuning(const Tuning& t);
-        const Tuning& tuning() const noexcept { return tuning_; }
-
         // Capacity / layout checks of a host item view (count > 0), as checkHost does first. CapacityError,
         // InvalidArgument.
         void validateHostItems(const HostItems& items) const;
 
     private:
-        // A captured "zero hits + staging copy + prepare()" sequence of one stream for one batch item count.
+        // A captured "zero hits + staging copy + prepare()" sequence of one stream for one (batch item count,
+        // hit-count address): the memset node and the captured params hold that address.
         struct PrepareGraph {
             std::uint32_t itemCount = 0;
             DevicePtr hits          = 0;       // BatchView::hitCounts at capture (memset node, params)
@@ -115,8 +104,8 @@ namespace rtcd::detail {
         static constexpr std::size_t kMaxPrepareGraphs = 8;
 
         struct StreamState {
-            DeviceBuffer staging; // maxBatchSize * floatsPerItem floats (BatchView::items)
-            DeviceBuffer hits;    // maxBatchSize uint32 (BatchView::hitCounts)
+            DeviceBuffer staging; // maxBatchSize * floatsPerItem floats (BatchView::items of graph / strided batches)
+            DeviceBuffer hits;    // maxBatchSize uint32 (BatchView::hitCounts unless counted into the result)
             DeviceBuffer params;  // kMaxLaunchParamsBytes
             // Upload cache (old uploadLaunchParams memcmp cache): bytes the params buffer holds.
             std::array<unsigned char, kMaxLaunchParamsBytes> uploaded{};
@@ -144,8 +133,8 @@ namespace rtcd::detail {
         LaunchPlan graphPrepare(std::uint32_t s, const BatchView& view, DevicePtr src, std::size_t stagingBytes);
         void destroyPrepareGraphs() noexcept;
         void drainStreams() noexcept;
-        // Checked; synchronizes every stream even if one fails, throws the first error. Streams [0, used) ran
-        // batches of the check (traced as SyncUsed), the others SyncIdle.
+        // Checked; synchronizes streams [0, used) (those that ran batches of the check) even if one fails, throws
+        // the first error.
         void synchronizeStreams(std::uint32_t used);
         void mark(std::size_t slot, Phase p) const noexcept {
             if (trace_ != nullptr) {
@@ -174,8 +163,6 @@ namespace rtcd::detail {
         std::mutex errorMutex_;
         std::exception_ptr firstError_;
         PhaseTrace* trace_ = nullptr; // diagnostic, not owned
-        Tuning tuning_;
-        bool resultsOnHost_ = false; // the running check's `results` is the pinned download buffer (host address)
         std::unique_ptr<StreamWorkers> workers_; // last: destroyed (joined) first
     };
 

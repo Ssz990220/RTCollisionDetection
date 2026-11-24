@@ -8,7 +8,6 @@
 //
 // Threading: run() must not be called concurrently with itself (the checker is not thread-safe anyway).
 
-#include <atomic>
 #include <cstdint>
 #include <exception>
 #include <functional>
@@ -35,13 +34,6 @@ namespace rtcd::detail {
         // other workers are not interrupted (the job itself decides whether to stop early).
         std::vector<std::exception_ptr> run(std::uint32_t active, const Job& job);
 
-        // Busy-wait budgets before blocking on a semaphore: the caller waiting for the workers to finish (join)
-        // and an idle worker waiting for its next job (wake). 0 = block at once. Call only between run()s.
-        void setSpin(std::uint32_t joinSpinUs, std::uint32_t wakeSpinUs) noexcept {
-            joinSpinUs_ = joinSpinUs;
-            wakeSpinUs_.store(wakeSpinUs, std::memory_order_relaxed);
-        }
-
         // Thread id of worker i (tests: which thread ran a prepare()).
         std::thread::id threadId(std::uint32_t i) const { return workers_.at(i)->thread.get_id(); }
 
@@ -57,8 +49,6 @@ namespace rtcd::detail {
         std::counting_semaphore<> done_{0};
         const Job* job_ = nullptr; // valid while run() waits
         bool stop_      = false;   // written before the final releases (semaphore release/acquire orders it)
-        std::uint32_t joinSpinUs_ = 0;
-        std::atomic<std::uint32_t> wakeSpinUs_{0};
     };
 
 } // namespace rtcd::detail

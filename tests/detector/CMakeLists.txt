@@ -26,3 +26,9 @@ target_compile_definitions(test_detector_facade PRIVATE NOMINMAX)
 rtcd_add_new_test(test_graph_prepare LABEL new_gpu
   SOURCES test_graph_prepare.cpp
   LIBS rtcd rtcd_testsupport rtcd_json)
+
+# The relaxed BatchView address rules (items in place, counting into the result range, single-batch checks on the
+# calling thread) with the real backends of all four modes, end to end against the goldens.
+rtcd_add_new_test(test_address_rules LABEL new_gpu
+  SOURCES test_address_rules.cpp
+  LIBS rtcd rtcd_testsupport rtcd_json)
