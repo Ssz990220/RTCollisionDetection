@@ -261,8 +261,9 @@ TEST_F(CurveKernels, FusedAndUnfusedControlPointsBitIdenticalToOld) {
 }
 
 TEST_F(CurveKernels, SegmentObbsContainTheSegmentAndMatchGenCurveOBB) {
+    for (const bool inject : {false, true})
     for (std::uint32_t degree : {1u, 2u}) {
-        SCOPED_TRACE("degree " + std::to_string(degree));
+        SCOPED_TRACE("degree " + std::to_string(degree) + (inject ? " with injected degenerate vertices" : " real points"));
         const std::uint32_t n   = 256;
         const std::uint32_t vpc = degree == 1 ? kT : 8u;
         const std::vector<float> q = trajectories(kT, n);
@@ -285,8 +286,8 @@ TEST_F(CurveKernels, SegmentObbsContainTheSegmentAndMatchGenCurveOBB) {
             for (std::uint32_t s = 0; s < spc; ++s) segStart.push_back(c * vpc + s);
             for (std::uint32_t v = 0; v < vpc; ++v) radii.push_back(r[c % S_]);
         }
-        // make some segments degenerate (repeated points) to cover the 1p / 2p branches
-        {
+        // optionally make some segments degenerate (repeated points) to cover the 1p / 2p branches
+        if (inject) {
             std::vector<float> h = pts.download<float>();
             for (std::size_t v = 0; v + 1 < h.size() / 3; v += 7) {
                 for (int k = 0; k < 3; ++k) h[(v + 1) * 3 + k] = h[v * 3 + k];
@@ -354,7 +355,8 @@ TEST_F(CurveKernels, SegmentObbsContainTheSegmentAndMatchGenCurveOBB) {
             // (NaN / non-orthogonal frames); documents the fixed old bugs.
             EXPECT_GT(oldBad, 0u) << "the old quadratic OBBs were expected to miss part of some segments";
             EXPECT_EQ(nonFiniteNew, 0u);
-            std::cout << "[ info ] quadratic segment OBBs: old kernel " << oldBad << " of " << nSegs
+            std::cout << "[ info ] " << (inject ? "with injected degenerate vertices" : "real control points")
+                      << ": quadratic segment OBBs: old kernel " << oldBad << " of " << nSegs
                       << " finite boxes not containing their segment and " << nonFiniteOld
                       << " non-finite boxes; new kernel 0 and " << nonFiniteNew << "\n";
         }
@@ -403,3 +405,4 @@ TEST_F(CurveKernels, CompactSegmentsMatchesHostReference) {
     }
     EXPECT_EQ(bad, 0u);
 }
+

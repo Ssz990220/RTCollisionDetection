@@ -18,6 +18,17 @@ rtcd_add_new_test(test_backend_curve LABEL new_gpu
   LIBS rtcd_backend_curve rtcd_json rtcd_testsupport)
 target_compile_definitions(test_backend_curve PRIVATE NOMINMAX)
 
+# OLD-STACK PARITY: refit policies (auto / always / never / every 3) x item counts, three consecutive checks each,
+# old CollisionDetector (side-by-side runner's old half) vs the new backend: identical flags; flips vs the golden are
+# printed. Delete with the old stack.
+if(TARGET rtcd_sbs_old_shelf)
+  rtcd_add_new_test(test_refit_parity_vs_old LABEL new_gpu
+    SOURCES test_refit_parity_vs_old.cpp
+    LIBS rtcd_backend_curve rtcd_json rtcd_testsupport rtcd_sbs_old_shelf)
+  target_compile_definitions(test_refit_parity_vs_old PRIVATE NOMINMAX)
+  set_tests_properties(test_refit_parity_vs_old PROPERTIES LABELS "new_gpu;backend_curve")
+endif()
+
 # Golden gate of this backend through the regression app with the reference engine (no detector needed), in
 # addition to the automatic rtcd_regression_* entries (tests/apps): quad twice more per geometry flag (the gate
 # wants >= 3 runs: the old quad path once had an intermittent race), and both curve modes with OBB culling on
