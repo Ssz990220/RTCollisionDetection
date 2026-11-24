@@ -886,7 +886,16 @@ TEST_P(CoreTest, SplitComputeOncePerKeyFinishEveryBatchNeverCapturing) {
     const std::size_t expectedCaptures[] = {4, 5, 5, 5, 6}; // check 5: stream 2 counts directly into r1: new key
     int k = 0;
     for (const auto& [a, r] : {std::pair<bool, DeviceBuffer*>{true, &r0}, {false, &r0}, {true, &r0}, {false, &r1}, {true, &r1}}) {
+        // prepareCompute()'s host-side effect: poison it before every check. On replayed batches it is not run, so
+        // the flag stays poisoned; results (checked inside) and prepareFinish's arguments must not care.
+        std::fill(fake->hostFlag.begin(), fake->hostFlag.end(), 0xDEADu);
+        const std::size_t capturesBefore = fake->computeCalls.size();
         check(a, *r);
+        if (fake->computeCalls.size() == capturesBefore) {
+            for (std::uint32_t v : fake->hostFlag) {
+                EXPECT_EQ(v, 0xDEADu) << "check " << k << ": a fully replayed check ran prepareCompute's host code";
+            }
+        }
         finishes += 5;
         EXPECT_EQ(fake->computeCalls.size(), expectedCaptures[k]) << "check " << k;
         EXPECT_EQ(fake->finishCalls.size(), finishes) << "check " << k << ": prepareFinish runs for every batch";
@@ -963,6 +972,7 @@ TEST_P(CoreTest, SplitEvictionAndManyItemCountsStayCorrect) {
     for (int rep = 0; rep < 3; ++rep) {
         for (std::uint32_t n = 1; n <= 16; ++n) { // 16 item counts > the per-stream cache of 8: evictions
             for (int twice = 0; twice < 2; ++twice) { // the second check counts directly into r (another key)
+                std::fill(fake->hostFlag.begin(), fake->hostFlag.end(), 0xDEADu); // must not matter (see above)
                 core->checkDevice(DeviceItems{dIn.ptr(), n, 0}, DeviceSpan<std::uint32_t>{r.ptr(), n});
                 std::vector<std::uint32_t> out(n);
                 r.download(out.data(), out.size() * sizeof(std::uint32_t));
