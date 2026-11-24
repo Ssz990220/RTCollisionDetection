@@ -6,8 +6,8 @@
 //
 //     backend.beginCheck(info)                                  // once per check, host only
 //     for batch b (on stream s = b % numStreams, in batch order per stream):
-//         core: copy the batch's items into stream s's staging buffer      (BatchView::items)
 //         core: zero stream s's hit-count buffer                           (BatchView::hitCounts)
+//         core: copy the batch's items into stream s's staging buffer      (BatchView::items)
 //         plan = backend.prepare(streams[s], batch)                        // per batch
 //         core: upload plan.params (skipped if byte-identical to stream s's last upload), optixLaunch(...)
 //               unless plan.launch == false
@@ -16,6 +16,11 @@
 //
 // There are no mode branches in that loop; everything mode-specific is inside prepare() and the programs.
 // Every virtual call here is once per checker, once per check or once per batch, never per item.
+// Current device: the core makes the Context's device current (Context::makeCurrent()) on every thread that
+// calls beginCheck() or prepare() -- the checker's calling thread and, with HostDispatch::ThreadPerStream, each
+// worker thread -- before the first such call. Backends therefore do not call makeCurrent() in beginCheck() /
+// prepare(). (The core also makes it current before createBackend(); the backends make it current again in
+// their constructors, so they can be constructed directly, e.g. by tests.)
 //
 // Headers: no OptiX / CUDA includes. Program descriptions use rtcd enums numerically equal to the OptiX ones
 // (static_asserted in src/detector).

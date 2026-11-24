@@ -2,7 +2,13 @@
 
 > **FROZEN as of commit `b4948ee` on branch `optix9-upgrade`** (the merge of Stage 0-C; Stage 0-C was based on
 > `c46667d`).
-> Since then: comment-only clarifications at Wave-1 close-out.
+> Since then: comment-only clarifications at Wave-1 close-out, and comment-only clarifications at Wave-2 close-out
+> (Stage 3, track C, based on `a605b47`: `RefitPolicy` can flip grazing hits, 3.7; the core makes the Context
+> current on every thread that calls `beginCheck` / `prepare`, and the loop comment of `backend.h` lists "zero
+> hit counts" before "staging copy" as in section 4, 3.10; `ReferenceExecutor::launch` threading, 3.13 -- the
+> last one with a small fix in `tests/support/reference_executor.cpp`, no declaration changed). Historical
+> skeleton-stage / Wave-1 material (placeholders, `tests/skeleton`, `debug_box`) is marked as such in sections 6 and 8;
+> section 10 records which open questions are settled by measurement.
 > From here on the contract -- every header under `include/rtcd/` (public and `internal/`) and this document --
 > is changed only by main. **Change procedure:** a module agent that needs a header change does not make it; it sends main a request naming the file, the exact declaration (old and new
 > text) and the reason. Main decides, applies the change in one commit to the contract, updates this document in
@@ -201,7 +207,11 @@ quadratic, none for linear and cubic, as the old `curveDefaultGeometryFlags` sin
 `resolved()` replaces Auto values; `curve.geometryFlags` always holds a value afterwards (RequireSingleAnyHitCall
 for `QuadraticCurve`, None for `LinearCurve`, `CubicCurve` and the non-curve modes; an explicit value is kept);
 with OBB culling on, the effective curve refit policy is Never and
-`ALLOW_UPDATE` is not set (old `curveUseRefit = !useOBB`). Construction-time checks against robot / scene / files
+`ALLOW_UPDATE` is not set (old `curveUseRefit = !useOBB`).
+Refit policy and results (Wave-2 close-out, measured): the policy is mostly a build vs. trace cost trade-off, but a
+refitted curve GAS can flip grazing hits. On the quadratic regression inputs at N = 4096, `{"every": 3}` reports two
+extra collisions (items 4065 and 3528), in the old and the new stack alike; `auto`, `always` and `never` showed no
+flip in 324 compared checks. The goldens are recorded with `auto`. Construction-time checks against robot / scene / files
 are in the checker (and backends): Ray `maxBatchSize * raysPerRobot < 2^30`, spline weight file exists and holds
 exactly `controlPoints' * trajectoryPoints` floats, curves need `RobotModel::hasSpheres()`, `robot.dof() <= kMaxDof`.
 Ownership: value. Threading: value. Errors: `ConfigError`.
@@ -259,6 +269,12 @@ Purpose: the seam between the mode-agnostic detector core and the backends.
 - `prepare` contract: GPU work only on its stream; no allocation; no device sync; host block only when
   `synchronizesHost` says so; per-stream state only, so the core may call it concurrently for different stream
   indices; params valid until the next prepare of that stream index.
+- Current device: the core makes the Context's device current on every thread that calls `beginCheck` /
+  `prepare` (the calling thread, and each worker thread with `ThreadPerStream`, section 4 steps 2 and 6), so
+  backends do not call `makeCurrent()` there (they do in their constructors, which the core also calls with the
+  device current).
+- Loop order per batch, as in section 4 step 7 and the `backend.h` header comment: zero hit counts, staging copy,
+  `prepare`, params upload + launch, result copy.
 - Factories `createMeshBackend / createRayBackend / createCurveBackend(BackendCreateInfo)`; the core switches on the
   mode once, at construction.
 Ownership: the checker owns the backend (`unique_ptr`) and destroys it before Scene / RobotModel / Context
@@ -304,7 +320,11 @@ Ownership: functions, values. Threading: reentrant. Errors: `IoError`, `ConfigEr
   (= `batchFkineTraj`); bit-identical outputs; take `KinematicsRef {host table, device table}`.
 - `reference_executor.h` (test support, 1e): `ReferenceExecutor` (pipeline + SBT from a `ProgramSet`, launches a
   `LaunchPlan`) and `ReferenceBatchRunner` (single-threaded batch loop following `backend.h`), so the Wave 2 backend
-  agents can test without the detector core and the core can be cross-checked.
+  agents can test without the detector core and the core can be cross-checked. Threading (Wave-2 close-out):
+  `launch()` may be called concurrently for different streams, first launches included (the per-stream param
+  blocks are kept in a `std::deque`, so creating one never moves another; before, a `std::vector` could reallocate
+  under a concurrent first launch, found in Wave 2 h); launches on one stream come from one thread at a time.
+  Tested by `ConcurrentFirstLaunchesOnDifferentStreams` (`tests/testsupport`).
 
 ## 4. The call sequence of one `check()`
 
@@ -321,7 +341,9 @@ Ownership: functions, values. Threading: reentrant. Errors: `IoError`, `ConfigEr
 5. `backend.beginCheck({n, nb})` on the calling thread. [`setNCheck` -> `setBatchCountHint` -> curve
    `applyRefitPolicy`]
 6. Dispatch: `SingleThread`: the calling thread runs step 7 for all batches in order; `ThreadPerStream`: worker
-   `s` runs step 7 for batches `s, s+S, s+2S, ...` in order; no cross-stream barrier is needed because all mutable
+   `s` first makes the Context's device current, then runs step 7 for batches `s, s+S, s+2S, ...` in order (so
+   every thread that calls `prepare` has the device current, as step 2 does for the calling thread and
+   `beginCheck`); no cross-stream barrier is needed because all mutable
    state is per stream. [`check()`: loop, or `ThreadPool<NSTREAM>` with a barrier after every round of NSTREAM
    batches, `threadPool.h`, `USE_MULTI_THREADING`]
 7. Per batch `b` on stream `s`:
@@ -429,7 +451,8 @@ sync, see open question Q5.
 | `SKIP_BASE` define (`robot.h`)                                             | `CheckerConfig::collapseRootLinkObb` |
 | `robot<DOF>`, `meshModel`, `robotConfig`                                   | `RobotModel`, `LinkGeometry`, `TriangleMesh`, `RobotDesc` |
 | `scene`, `obstacle`, `cube`, `batchScene`, `baseBatchScene`                | `Scene`, `SceneDesc`, `ObstacleDesc` |
-| `Scene/shelf.h`, `denseShelf.h`, `shelfSimple.h`, `debugBox.h`, `sceneBuilder.h`, defines `SHELF / DENSESHELF / SHELFSIMPLE` | `configs/scenes/*.json` |
+| `Scene/shelf.h`, `denseShelf.h`, `shelfSimple.h`, `sceneBuilder.h`, defines `SHELF / DENSESHELF / SHELFSIMPLE` | `configs/scenes/shelf.json`, `shelf_dense.json`, `shelf_simple.json` |
+| `Scene/debugBox.h` (`models/debugBox.obj`)                                  | not ported (no `configs/scenes/debug_box.json`; used by no test, benchmark or golden) |
 | `buildSharedScene(loop)`                                                   | `CheckerConfig::sceneEdges` (+ `Scene` holds both sets) |
 | `CUDABuffer`, `CUDAPitchBuffer`                                            | `DeviceBuffer`, `PinnedHostBuffer` (pitch buffer unused, dropped) |
 | `CUDA_CHECK` (no-op in Release), `CUDA_CHECK_LAST`, `CUDA_SYNC_CHECK` (exit), `OPTIX_CHECK` (exit) | `RTCD_CUDA_CHECK`, `RTCD_CU_CHECK`, `RTCD_OPTIX_CHECK(_LOG)` (throw, all builds) |
@@ -604,7 +627,13 @@ declarations listed, in the directories it owns. Cross-module needs go through t
 An owned directory includes its `CMakeLists.txt` (keep the target name, its PUBLIC links as in section 2, and
 `rtcd_register_new_target`; adding PRIVATE dependencies and sources is the owner's call). Main owns everything
 else: `include/rtcd/`, `docs/design/`, `cmake/`, the top-level `CMakeLists.txt`, `src/CMakeLists.txt`,
-`tests/CMakeLists.txt`, `apps/CMakeLists.txt`, `tests/interfaces_compile.cpp`, `tests/skeleton`.
+`tests/CMakeLists.txt`, `apps/CMakeLists.txt`, `tests/interfaces_compile.cpp`.
+
+> **Historical (Waves 1 and 2 are merged).** This section records the assignments as they were given. Waves 1
+> and 2 are complete (state at `a605b47`): every library has real sources, the placeholder sources and main's
+> `tests/skeleton` (with `test_skeleton_unit`) no longer exist, test-local stubs were deleted at the merges, and
+> the backends' goldens run through `CollisionChecker`. The placeholder and skeleton rules below applied only
+> while Wave 1 was in progress.
 
 **Wave 1 (parallel)**
 
@@ -612,9 +641,9 @@ Five agents, all running at the same time. Rules common to all of them:
 
 - Every cross-agent dependency is a function or type DECLARED in `include/rtcd/` (public or `internal/`). Nobody
   includes another agent's private header (`src/<x>/...`) or relies on a symbol not declared there.
-- Each agent replaces the `placeholder.cpp` / `placeholder.cu` of its own libraries and deletes it with its first
-  real source. `tests/skeleton` (main's) keeps calling the placeholders until main deletes it at the Wave-1 merge;
-  keep a placeholder function until then if `test_skeleton_unit` would otherwise fail to link, or tell main.
+- (Historical, Wave 1 only.) Each agent replaced the `placeholder.cpp` / `placeholder.cu` of its own libraries and
+  deleted it with its first real source; main's `tests/skeleton` called the placeholders until main deleted it at
+  the Wave-1 merge.
 - Before another Wave-1 agent's implementation has landed, a test may link a clearly marked test-local stub or
   fake of a declared function, inside the test's own `tests/<x>/` folder (never under `src/`), deleted at merge.
   Code that needs the real thing is written now and integration-tested after the merge.
@@ -636,8 +665,8 @@ Five agents, all running at the same time. Rules common to all of them:
   (i) Owns `src/config`, `src/json`, `tests/config`, `tests/json`, `configs/**`.
   (ii) `config.h`: `CheckerConfig::validate`, `CheckerConfig::resolved` (including the `curve.geometryFlags`
   "auto" rule, 3.7); `json_config.h`: every function. `configs/`: checker per regression mode, scenes `shelf`,
-  `shelf_dense`, `shelf_simple`, `debug_box` ported from `RTCD/CollisionScenes/Scene/*.h`, `robots/panda.json`,
-  setups, the spline-weights copy (section 11).
+  `shelf_dense`, `shelf_simple` ported from `RTCD/CollisionScenes/Scene/*.h` (`debug_box` was also listed here but
+  was not ported, see section 6), `robots/panda.json`, setups, the spline-weights copy (section 11).
   (iii) Needs no other agent: `rtcd_config` has no dependencies and `rtcd_json` only `rtcd_config`; the structs it
   fills (`SceneDesc`, `RobotDesc`, `Transform`) and the exception classes are header-only. Tests: defaults, every
   validation rule, `resolved()` per mode, unknown keys, path resolution, overrides, dump round trip. No GPU.
@@ -719,14 +748,28 @@ libraries, never linked or run), so every agent's build enforces them:
 
 Each with the choice made in the headers and the recommendation.
 
+**Settled by measurement (Wave-2 close-out, state at `a605b47`).** With the real `CollisionChecker` and backends
+the new stack reproduces all four goldens (ias 1365, ray 1383, linear 2895, quad 2847 collisions of 4096; 0 diffs;
+ray in all four hit modes, quad with both geometry flags, curves also with OBB culling on). Same-process timing old
+vs new (`rtcd_sbs_shelf`, medium shelf, measured by main), new/old median: 0.97-1.01 (mesh), 0.87-0.97 (ray),
+0.98-1.08 (linear), 0.98-1.04 (quad).
+- Q1 (device-buffer kinematics table): kept; no measurable cost (the ratios above; no switch to by-value needed).
+- Q2 (one pipeline per checker): kept; parity (the ratios above).
+- Q5 (old curve OBB path): confirmed wrong, fixed in the new stack (two defects: compacted primitive indices were
+  mapped through the uncompacted segment -> pose map, and the old quadratic `OBB_3p` boxes did not contain their
+  segments, which dropped 32 quad regression hits with OBB culling on); OBB on == OBB off flags is tested.
+- Q20 (error check after every kernel launch): kept; no measurable cost (the ratios above).
+The entries below keep their original text; the "Settled" lines refer to this paragraph.
+
 - **Q1 Kinematics table access in kernels.** Chosen: the table lives in a per-owner device buffer (section 3 of the
   brief); kernel wrappers take `KinematicsRef {host, device}` so the implementation can either read the device
   buffer (staging it in shared memory per block) or pass the host table by value as a `__grid_constant__` kernel
   parameter (2.4 KB, below the 4 KB parameter limit; constant-bank access like the old `__constant__`, still
   per-robot, no globals). Recommendation: implement the device-buffer read first; if BM_IAS / BM_RAY at small N
-  regress, switch to by-value without any header change.
+  regress, switch to by-value without any header change. **Settled:** device buffer, no measurable cost.
 - **Q2 One pipeline per checker** (chosen) vs one identical pipeline per stream (old `createPipeline`). OptiX allows
-  concurrent launches of one pipeline on several streams. Recommendation: one; measure once.
+  concurrent launches of one pipeline on several streams. Recommendation: one; measure once. **Settled:** one
+  pipeline, parity.
 - **Q3 Per-stream hit buffer + D2D copy into the result** (chosen, old behaviour, stable addresses for later graph
   capture) vs writing directly into the result buffer at `firstItem` (saves one copy per batch, but the params then
   change every batch, defeating the upload cache). Recommendation: keep; revisit with CUDA graphs.
@@ -737,7 +780,8 @@ Each with the choice made in the headers and the recommendation.
   (`batchOptixCurveRobot::getMapIndex` returns the template); cubic OBB throws "not implemented". It is not covered
   by any golden (curve goldens run with OBB off). Chosen: OBB culling allowed for linear / quadratic, rejected for
   cubic by `validate()`. Recommendation: (h) builds a compacted segment -> item map with `compactByFlags` and adds a
-  test "OBB on == OBB off flags" on the regression inputs; report if the old path really is wrong.
+  test "OBB on == OBB off flags" on the regression inputs; report if the old path really is wrong. **Settled:**
+  the old path is wrong; fixed (compacted map, corrected `OBB_3p`), OBB on == OBB off tested.
 - **Q6 `collapseRootLinkObb`** reproduces `SKIP_BASE` (root OBB shrunk to a point -- not removed: a point inside an
   obstacle OBB still overlaps). Recommendation: keep default true until parity; then consider excluding fixed
   links from culling and tracing altogether.
@@ -777,7 +821,7 @@ Each with the choice made in the headers and the recommendation.
   placement, and the scene stays robot-independent).
 - **Q20 Error check after every kernel launch** (`cudaGetLastError`, chosen) costs a few host calls per batch that
   the old Release build did not make. Recommendation: keep (correctness), include in the first parity
-  measurement.
+  measurement. **Settled:** kept, no measurable cost.
 - **Q21 Snapping tolerance 1e-9** for the derived kinematics masks: chosen so that `cos(+-pi/2)` (about 5e-12 from
   the URDF's 1.57079632679) becomes exactly 0 as in `pandas.h`. If any Panda entry still differs, (1d) reports
   and the rule is adjusted, not the goldens.
