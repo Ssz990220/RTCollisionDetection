@@ -193,9 +193,4 @@ namespace rtcd {
         return r;
     }
 
-    namespace detail {
-        // Kept until main deletes tests/skeleton at the Wave-1 merge (test_skeleton_unit calls it to prove linking).
-        void configPlaceholder() {}
-    } // namespace detail
-
 } // namespace rtcd

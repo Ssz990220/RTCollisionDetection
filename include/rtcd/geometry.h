@@ -110,6 +110,9 @@ namespace rtcd {
     // becomes pose * (scale * v) (old meshModel(path, transform, scale); the implementation must reproduce the
     // old float results of `vertex *= scale; transformPoint(vertex, Eigen::Affine3f)`); edges and loop edges by
     // computeEdges(). Throws IoError (missing / unreadable / not OBJ) and InvalidArgument (scale <= 0).
+    // With identity pose and scale 1 the vertices are returned exactly as read, with no arithmetic at all (this
+    // preserves -0.0f coordinates, which the Panda link0 / link5 / link6 meshes contain and the goldens depend on);
+    // any other pose / scale applies `vertex *= scale`, then the affine transform, in float, in that order.
     TriangleMesh loadObjMesh(const std::filesystem::path& file, const Transform& pose = Transform{}, float scale = 1.0f);
 
     // Recomputes mesh.uniqueEdges, mesh.loopEdges and mesh.watertight from mesh.triangles (old loadOBJ edge and

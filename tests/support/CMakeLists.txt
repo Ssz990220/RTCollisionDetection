@@ -7,7 +7,6 @@
 # Object-file split matters: tests that only use the host utilities must not pull reference_executor.obj (which
 # needs OptiX / rtcd_core at link time), so every utility is its own .cpp.
 add_library(rtcd_testsupport STATIC
-  placeholder.cpp          # keeps rtcd::detail::testsupportPlaceholder() for tests/skeleton until main deletes it
   paths.cpp
   inputs.cpp
   golden.cpp

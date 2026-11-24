@@ -254,8 +254,7 @@ namespace {
 
     // Values of the old RTCD/CollisionScenes/Scene/*.h (Eigen::Affine3f::Identity().translate(Vector3f(x, y, z)),
     // scale 1.0).
-    void expectScene(const fs::path& file, const char* name, const std::vector<ExpectedObstacle>& expected,
-        bool meshesExist = true) {
+    void expectScene(const fs::path& file, const char* name, const std::vector<ExpectedObstacle>& expected) {
         const SceneDesc d = loadSceneDesc(file);
         EXPECT_EQ(d.name, name);
         ASSERT_EQ(d.obstacles.size(), expected.size());
@@ -263,9 +262,7 @@ namespace {
             const ObstacleDesc& o = d.obstacles[i];
             EXPECT_EQ(o.name, expected[i].name);
             EXPECT_EQ(o.mesh, norm(repo() / expected[i].mesh));
-            if (meshesExist) {
-                EXPECT_TRUE(fs::exists(o.mesh)) << o.mesh;
-            }
+            EXPECT_TRUE(fs::exists(o.mesh)) << o.mesh;
             EXPECT_EQ(o.scale, 1.0f);
             const Transform t{{1, 0, 0, expected[i].x, 0, 1, 0, expected[i].y, 0, 0, 1, expected[i].z}};
             EXPECT_TRUE(sameBits(o.pose, t)) << expected[i].name;
@@ -296,12 +293,6 @@ TEST(JsonConfigs, SceneShelfSimple) {
     expectScene(configs() / "scenes" / "shelf_simple.json", "shelf_simple",
         {{"shelf", "models/curobo/shelves.obj", 0.45f, 0, 0.4f}, {"bin1", "models/curobo/bin.obj", 0, -0.6f, 0},
             {"bin2", "models/curobo/bin.obj", 0, 0.6f, 0}});
-}
-
-TEST(JsonConfigs, SceneDebugBox) {
-    // The old Scene/debugBox.h references models/debugBox.obj, which is not in the repository.
-    expectScene(configs() / "scenes" / "debug_box.json", "debug_box", {{"debug_box", "models/debugBox.obj", 0, 0, 0}},
-        /*meshesExist=*/false);
 }
 
 TEST(JsonConfigs, RobotPanda) {

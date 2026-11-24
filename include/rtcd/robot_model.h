@@ -88,7 +88,9 @@ namespace rtcd {
         std::string name;                       // URDF name of the chain link
         std::vector<std::string> mergedLinks;   // URDF links merged into it by fixed joints (may be empty)
         TriangleMesh mesh;                      // link frame
-        std::vector<Sphere> spheres;            // link frame, file order (merged links appended in URDF order)
+        std::vector<Sphere> spheres;            // link frame, file order (merged links appended in URDF order:
+                                                // the order of urdfdom's child-joint container, i.e. sorted by
+                                                // joint name, not file order)
         Obb obb;                                // best-fit OBB of mesh.vertices, link frame
         std::filesystem::path meshFile;
         std::filesystem::path sphereFile;       // empty if no spheres were requested

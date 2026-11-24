@@ -1059,9 +1059,4 @@ namespace rtcd {
         return j.dump(2);
     }
 
-    namespace detail {
-        // Kept until main deletes tests/skeleton at the Wave-1 merge (test_skeleton_unit calls it to prove linking).
-        void jsonPlaceholder() {}
-    } // namespace detail
-
 } // namespace rtcd
