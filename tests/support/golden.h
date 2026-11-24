@@ -1,5 +1,5 @@
 #pragma once
-// support/golden.h -- collision-flag goldens (data/CCTest/golden_<mode>.bin) and flag comparison, as in
+// support/golden.h -- collision-flag goldens (tests/data/CCTest/golden_<mode>.bin) and flag comparison, as in
 // RTCD/CollisionDetector/Test/ccRegression.cpp.
 //
 // Golden format (old ccRegression --write-golden): raw bytes, one uint8 per item, 1 = in collision, 0 = free,

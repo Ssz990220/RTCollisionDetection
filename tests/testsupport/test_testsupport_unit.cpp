@@ -1,4 +1,5 @@
-// new_unit: host utilities of rtcd_testsupport (support/*.h). Runs from the repository root (data/ junction).
+// new_unit: host utilities of rtcd_testsupport (support/*.h). Runs from the repository root (reference data in
+// tests/data).
 #include <support/golden.h>
 #include <support/inputs.h>
 #include <support/options.h>
@@ -29,7 +30,11 @@ namespace {
 
 TEST(Paths, FindsRepoRootAndData) {
     const fs::path root = findRepoRoot();
-    EXPECT_TRUE(fs::is_directory(root / "data"));
+    EXPECT_TRUE(fs::is_directory(root / "tests" / "data"));
+    EXPECT_TRUE(fs::is_directory(root / "configs"));
+    if (!getEnv("RTCD_DATA_DIR")) {
+        EXPECT_EQ(fs::weakly_canonical(dataDir()), fs::weakly_canonical(root / "tests" / "data"));
+    }
     EXPECT_TRUE(fs::is_directory(dataDir() / "CCTest"));
     EXPECT_EQ(dataDir(fs::path("x/y")), fs::absolute("x/y"));
     EXPECT_FALSE(executableDir().empty());

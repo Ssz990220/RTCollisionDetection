@@ -20,7 +20,7 @@
 #
 #   rtcd_add_new_test(<name> LABEL new_unit|new_gpu SOURCES <src>... [LIBS <target>...] [ARGS <arg>...])
 #       GoogleTest executable in bin/Tests/new, registered with ctest under LABEL (new_unit: no GPU needed;
-#       new_gpu: needs a GPU). Runs with the repository root as working directory (data/ is reachable as ./data).
+#       new_gpu: needs a GPU). Runs with the repository root as working directory (reference data in ./tests/data).
 #       The old stack's golden tests keep the label `regression`.
 #
 #   rtcd_add_app(<name> SOURCES <src>... [LIBS <target>...])

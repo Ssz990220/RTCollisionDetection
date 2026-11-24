@@ -6,3 +6,5 @@
 # To ignore it use below
 *.ipynb linguist-documentation
 *.ipynb filter=strip-notebook-output
+# committed reference data (tests/data, tests/data/reference): raw little-endian binaries
+*.bin binary

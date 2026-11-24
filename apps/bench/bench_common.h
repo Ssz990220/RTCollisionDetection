@@ -13,8 +13,8 @@
 //   --scene <name | scene.json>  a name is configs/scenes/<name>.json: shelf (default, old SHELF build),
 //                                shelf_simple (old SHELFSIMPLE), shelf_dense (old DENSESHELF)
 //   --robot <robot.json>         default configs/robots/panda.json
-//   --data <dir>                 data folder (default: env RTCD_DATA_DIR, else found from the working directory /
-//                                executable)
+//   --data <dir>                 data folder (default: env RTCD_DATA_DIR, else <repo>/tests/data, the repository
+//                                found from the working directory / executable)
 //   --rtcd_help                  print these options and exit
 // The JSON output's "context" gets rtcd_stack = "new", rtcd_scene, rtcd_robot and rtcd_device entries.
 // Smoke test (tests/apps): --benchmark_dry_run=true --benchmark_filter=... runs one iteration, no warm-up.

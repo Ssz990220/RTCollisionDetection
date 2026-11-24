@@ -5,8 +5,8 @@
 // __constant__ globals; the new kernels get the table derived from panda.urdf in a device buffer. Every output
 // must be equal BYTE FOR BYTE. Delete with the old stack (keep the new-only checks).
 //
-// Inputs: the cached regression poses data/motions/Panda4096.bin (4096 x 7 floats, the IAS / RAY regression
-// input) and the regression's KNN trajectories rebuilt from those poses and data/motions/Panda/1111111/
+// Inputs: the cached regression poses tests/data/motions/Panda4096.bin (4096 x 7 floats, the IAS / RAY regression
+// input) and the regression's KNN trajectories rebuilt from those poses and tests/data/motions/Panda/1111111/
 // 4096_knn4_idx.bin exactly as RTCD/Utils/Test/poseUtils.h genCSpaceKNNTraj does (16 points per trajectory,
 // first 4096 trajectories = the LINEAR / QUAD regression input).
 #include "robot/urdf_chain.h"
@@ -54,7 +54,7 @@ namespace {
     constexpr int kTrajPts       = 16;
 
     const std::vector<float>& regressionPoses() {
-        static const std::vector<float> p = readFloats("data/motions/Panda4096.bin", kPoses * Dim);
+        static const std::vector<float> p = readFloats("tests/data/motions/Panda4096.bin", kPoses * Dim);
         return p;
     }
 
@@ -62,7 +62,7 @@ namespace {
     std::vector<float> regressionTrajectories() {
         const auto& P = regressionPoses();
         std::vector<int> idx(kPoses * kKnn);
-        std::ifstream in("data/motions/Panda/1111111/4096_knn4_idx.bin", std::ios::binary);
+        std::ifstream in("tests/data/motions/Panda/1111111/4096_knn4_idx.bin", std::ios::binary);
         if (!in || P.empty()) {
             ADD_FAILURE() << "missing KNN index cache";
             return {};

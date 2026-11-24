@@ -7,6 +7,8 @@
 //   * goldens decode as ccRegression.cpp reads them.
 // Byte comparison (memcmp), no tolerance. The old functions would generate and write missing caches, so every
 // file they read is asserted to exist first. No GPU work runs (the cache path of the old code is host only).
+// The old code reads only PROJECT_BASE_DIR/data (the local, gitignored folder that generated the reference data);
+// the new code reads the committed copies in tests/data. Without the local folder every test here is skipped.
 #include <support/golden.h>
 #include <support/inputs.h>
 #include <support/paths.h>
@@ -19,6 +21,8 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
+#include <vector>
 
 namespace fs = std::filesystem;
 namespace sup = rtcd::support;
@@ -32,8 +36,19 @@ namespace {
     constexpr std::array<float, kDim> kWeight{1, 1, 1, 1, 1, 1, 1};
 
     // The old code reads PROJECT_BASE_DIR/data (config.h of this build); the new code the data dir it finds.
-    fs::path oldMotions() { return fs::path(PROJECT_BASE_DIR) / "data" / "motions"; }
+    fs::path oldData() { return fs::path(PROJECT_BASE_DIR) / "data"; }
+    fs::path oldMotions() { return oldData() / "motions"; }
     fs::path newMotions() { return sup::dataDir() / "motions"; }
+
+#define SKIP_WITHOUT_OLD_DATA()                                                                                    \
+    if (!fs::is_directory(oldMotions())) {                                                                         \
+        GTEST_SKIP() << "the old stack's local data folder " << oldData() << " is not present";                  \
+    }
+
+    std::vector<char> fileBytes(const fs::path& p) {
+        std::ifstream in(p, std::ios::binary);
+        return std::vector<char>((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    }
 
     void requireCache(size_t n, bool knn) {
         ASSERT_TRUE(fs::exists(oldMotions() / ("Panda" + std::to_string(n) + ".bin")));
@@ -60,8 +75,18 @@ namespace {
     }
 } // namespace
 
-TEST(VsOld, SameDataDirectory) {
-    EXPECT_EQ(fs::weakly_canonical(oldMotions()), fs::weakly_canonical(newMotions()));
+// The committed reference inputs (tests/data) are byte copies of the old local cache.
+TEST(VsOld, CommittedDataEqualsTheLocalCache) {
+    SKIP_WITHOUT_OLD_DATA();
+    for (const char* rel : {"motions/Panda4096.bin", "motions/Panda8192.bin", "motions/Panda/1111111/4096_knn4_idx.bin",
+             "motions/Panda/1111111/8192_knn4_idx.bin", "CCTest/golden_ias.bin", "CCTest/golden_ray.bin",
+             "CCTest/golden_linear.bin", "CCTest/golden_quad.bin"}) {
+        ASSERT_TRUE(fs::exists(oldData() / rel)) << rel;
+        ASSERT_TRUE(fs::exists(sup::dataDir() / rel)) << rel;
+        const auto a = fileBytes(oldData() / rel);
+        EXPECT_FALSE(a.empty()) << rel;
+        EXPECT_EQ(a, fileBytes(sup::dataDir() / rel)) << rel;
+    }
 }
 
 TEST(VsOld, WeightString) {
@@ -69,6 +94,7 @@ TEST(VsOld, WeightString) {
 }
 
 TEST(VsOld, DiscreteRegressionInputs) {
+    SKIP_WITHOUT_OLD_DATA();
     requireCache(4096, false);
     const auto old              = oldPoses<4096>();
     const std::vector<float> nw = sup::regressionInputs(newMotions(), 1);
@@ -77,6 +103,7 @@ TEST(VsOld, DiscreteRegressionInputs) {
 }
 
 TEST(VsOld, CurveRegressionInputs) {
+    SKIP_WITHOUT_OLD_DATA();
     requireCache(4096, true);
     for (int nT : {16, 8, 32}) {
         const auto old              = oldTraj<4096>(nT);
@@ -89,6 +116,7 @@ TEST(VsOld, CurveRegressionInputs) {
 }
 
 TEST(VsOld, BenchmarkPools) {
+    SKIP_WITHOUT_OLD_DATA();
     requireCache(8192, true);
     const auto oldP              = oldPoses<8192>();
     const std::vector<float> nwP = sup::benchmarkPosePool(newMotions());
@@ -106,6 +134,7 @@ TEST(VsOld, BenchmarkPools) {
 }
 
 TEST(VsOld, GoldensDecodeIdentically) {
+    SKIP_WITHOUT_OLD_DATA();
     for (const char* m : {"ias", "ray", "linear", "quad"}) {
         const fs::path p = fs::path(PROJECT_BASE_DIR) / "data" / "CCTest" / (std::string("golden_") + m + ".bin");
         ASSERT_TRUE(fs::exists(p)) << p;

@@ -9,7 +9,7 @@
 //   1. determinism: two full runs of `items` items agree;
 //   2. prefix consistency: the first N items alone give the same flags as the full run, N = 1, 37, B, B*S + 5,
 //      1000, items - 1 (B = max_batch_size, S = streams);
-//   3. golden diff: flags == data/CCTest/golden_<ias|ray|linear|quad>.bin (by mode; --golden overrides,
+//   3. golden diff: flags == tests/data/CCTest/golden_<ias|ray|linear|quad>.bin (by mode; --golden overrides,
 //      --no-golden skips; cubic curves have no golden). Goldens are never written.
 // Inputs: support/inputs.h regressionInputs (byte-identical to the old harness): poses for the discrete modes,
 // KNN trajectories with curve.trajectory_points waypoints for the curve modes.

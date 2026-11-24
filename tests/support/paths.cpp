@@ -23,7 +23,8 @@ namespace rtcd::support {
     namespace {
         bool isRepoRoot(const fs::path& p) {
             std::error_code ec;
-            return fs::is_directory(p / "data" / "motions", ec) || fs::is_directory(p / "data" / "CCTest", ec);
+            const fs::path data = p / "tests" / "data";
+            return fs::is_directory(data / "motions", ec) || fs::is_directory(data / "CCTest", ec);
         }
 
         std::optional<fs::path> walkUp(fs::path p) {
@@ -91,7 +92,8 @@ namespace rtcd::support {
                 return *r;
             }
         }
-        throw IoError("cannot find the repository root (a directory containing data/motions or data/CCTest) above "
+        throw IoError("cannot find the repository root (a directory containing tests/data/motions or tests/data/CCTest) "
+                      "above "
                       "the working directory or the executable; pass the data directory explicitly or set "
                       "RTCD_DATA_DIR",
             fs::current_path(ec));
@@ -104,7 +106,7 @@ namespace rtcd::support {
         if (auto env = getEnv("RTCD_DATA_DIR"); env && !env->empty()) {
             return fs::absolute(fs::path(*env));
         }
-        return findRepoRoot() / "data";
+        return findRepoRoot() / "tests" / "data";
     }
 
     fs::path configsDir() {

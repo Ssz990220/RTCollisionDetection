@@ -11,7 +11,7 @@
 #   rtcd_add_new_test(<name> LABEL new_unit|new_gpu SOURCES ... LIBS ...)
 # (cmake/RTCDTargets.cmake); folders are picked up automatically at configure time. tests/support (library
 # rtcd_testsupport) is added by the top-level CMakeLists.txt instead. Tests run from the repository root, so the
-# shared data is ./data and configs are ./configs.
+# reference data is ./tests/data (tests/data/README.md) and configs are ./configs.
 
 # ---- compile-only checks of the public headers (part of AllNew; nothing is linked or run) ----
 # "Public headers are plain C++20": these targets see ONLY include/ (no CUDA, no OptiX, no other library) and
