@@ -1,6 +1,5 @@
 file(GLOB SOURCES "*.h" "*.cuh" "cuda/*.cuh")
-file(GLOB UTIL_CUDA_SRC "cuda/*.cu")
-set(UTIL_CUDA_SRC ${UTIL_CUDA_SRC} PARENT_SCOPE)
+# cuda/*.cu are compiled once in rtcd_legacy_kernels (RTCD/CMakeLists.txt)
 
 add_library(utils INTERFACE)
 
@@ -20,8 +19,8 @@ target_link_libraries(utils INTERFACE
 if (BUILD_TESTS)
 
   macro(add_util_test name)
-    add_executable(${name} Test/src/${name}.cpp ${UTIL_CUDA_SRC})
-    target_link_libraries(${name} PRIVATE utils)
+    add_executable(${name} Test/src/${name}.cpp)
+    target_link_libraries(${name} PRIVATE utils rtcd_legacy_kernels)
     set_target_properties(${name} PROPERTIES FOLDER "Tests/Utils")
     set_target_properties(${name} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/Tests)
     target_link_libraries(${name} PRIVATE GTest::gtest GTest::gtest_main)

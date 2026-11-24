@@ -1,5 +1,5 @@
 macro(addBenchmark name src scene)
-    add_executable(${name} ${src} ${CU_SRC} ${UTIL_CUDA_SRC} ../../Planner/KNN/knnCUDA.cu)
+    add_executable(${name} ${src})
     target_link_libraries(${name} benchmark::benchmark CollisionDetector CUDA::nvtx3)
     set_target_properties(${name} PROPERTIES FOLDER "Benchmark")
     set_target_properties(${name} PROPERTIES RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/Benchmarks)
