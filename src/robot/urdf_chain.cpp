@@ -229,6 +229,30 @@ namespace rtcd::robot_detail {
         return buildChain(std::move(model), source, urdfFile.string());
     }
 
+    void hostLinkPoses(const KinematicsTable& t, const float* q, float* out) {
+        for (std::size_t e = 0; e < kTransformFloats; ++e) {
+            out[e] = t.base[e];
+        }
+        for (std::uint32_t j = 0; j < t.dof; ++j) {
+            const float c = std::cos(q[j]), s = std::sin(q[j]);
+            float local[kTransformFloats];
+            for (std::size_t e = 0; e < kTransformFloats; ++e) {
+                local[e] = c * t.cosMask[j][e] + s * t.sinMask[j][e] + t.oneMask[j][e];
+            }
+            const float* a = out + j * kTransformFloats;
+            float* r       = out + (j + 1) * kTransformFloats;
+            for (int i = 0; i < 3; ++i) {
+                for (int col = 0; col < 4; ++col) {
+                    float v = a[i * 4 + 0] * local[0 + col] + a[i * 4 + 1] * local[4 + col] + a[i * 4 + 2] * local[8 + col];
+                    if (col == 3) {
+                        v += a[i * 4 + 3];
+                    }
+                    r[i * 4 + col] = v;
+                }
+            }
+        }
+    }
+
     KinematicsTable kinematicsFromChain(const Chain& chain, const Transform& basePose) {
         KinematicsTable t{};
         t.dof      = static_cast<std::uint32_t>(chain.joints.size());

@@ -84,4 +84,8 @@ namespace rtcd::robot_detail {
 
     inline constexpr double kSnapTolerance = 1e-9;
 
+    // Host reference FK over a table (float, std::sin / std::cos; same formula as the kernels, not bit-identical):
+    // q = table.dof floats, out = table.numLinks * 12 floats. Behind RobotModel::linkPoses.
+    void hostLinkPoses(const KinematicsTable& table, const float* q, float* out);
+
 } // namespace rtcd::robot_detail

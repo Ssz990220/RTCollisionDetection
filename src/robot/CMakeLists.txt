@@ -4,7 +4,10 @@ add_library(rtcd_robot STATIC
   placeholder.cpp
   urdf_chain.h
   urdf_chain.cpp
+  kinematics.cu
 )
+# kinematics.cu must keep the old stack's CUDA flags (no -use_fast_math, default FMA contraction, no RDC): the
+# kernels are required to be bit-identical to RTCD/Robot/robot.cu (rtcd_legacy_kernels uses the project defaults).
 target_include_directories(rtcd_robot
   PUBLIC  ${PROJECT_SOURCE_DIR}/include
   PRIVATE ${PROJECT_SOURCE_DIR}/src)

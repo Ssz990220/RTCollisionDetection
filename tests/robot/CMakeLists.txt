@@ -13,3 +13,17 @@ rtcd_add_new_test(test_robot_kinematics_table LABEL new_unit
   LIBS rtcd_robot urdfdom::urdf_parser urdfdom::urdfdom_model)
 target_include_directories(test_robot_kinematics_table PRIVATE
   ${PROJECT_SOURCE_DIR}/src ${rtcd_robot_test_legacy_includes})
+
+# TEST-LOCAL STUB of rtcd_core (DeviceBuffer, throw helpers) while 1a's implementation has not landed: used only
+# as long as src/core/placeholder.cu exists (1a deletes it with its first real source). Delete at the merge.
+set(rtcd_robot_core_stub "")
+if(EXISTS ${PROJECT_SOURCE_DIR}/src/core/placeholder.cu)
+  set(rtcd_robot_core_stub core_stub.cpp)
+endif()
+
+# New FK kernels vs the old robot.cu kernels on the cached regression poses / KNN trajectories (GPU).
+rtcd_add_new_test(test_robot_kinematics_kernels LABEL new_gpu
+  SOURCES test_kinematics_kernels.cpp ${rtcd_robot_core_stub}
+  LIBS rtcd_robot rtcd_legacy_kernels)
+target_include_directories(test_robot_kinematics_kernels PRIVATE
+  ${PROJECT_SOURCE_DIR}/src ${rtcd_robot_test_legacy_includes})
