@@ -2,6 +2,8 @@
 # through rtcd_geometry) and include/rtcd/internal/kinematics.h (FK / OBB / trajectory kernels, .cu files here).
 add_library(rtcd_robot STATIC
   placeholder.cpp
+  urdf_chain.h
+  urdf_chain.cpp
 )
 target_include_directories(rtcd_robot
   PUBLIC  ${PROJECT_SOURCE_DIR}/include
