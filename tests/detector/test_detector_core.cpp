@@ -1,0 +1,646 @@
+// new_gpu: the detector core (src/detector, DetectorCore) with a fake backend (fake_backend.h) and a trivial
+// program module (detector_test_program.cu). Covers: program-set handling (raygen selection, miss / closest-hit /
+// any-hit, built-in sphere IS), batch loop order, stream mapping, worker threads and current CUDA context,
+// param-upload cache, launch == false, stats, error propagation and stream draining, capacity / argument errors,
+// HostDispatch both ways, checkDevice, strided input, warmup, and a cross-check against ReferenceBatchRunner.
+#include "detector/detector_core.h"
+
+#include <rtcd/device_buffer.h>
+#include <rtcd/errors.h>
+#include <rtcd/internal/reference_executor.h>
+
+#include "fake_backend.h"
+
+#include <cuda_runtime.h>
+#include <optix.h>
+#include <optix_stubs.h>
+
+#include <gtest/gtest.h>
+
+#include <algorithm>
+#include <cstdint>
+#include <memory>
+#include <thread>
+#include <vector>
+
+using namespace rtcd;
+using namespace rtcd_detector_test;
+using rtcd::detail::DetectorCore;
+using rtcd::detail::DetectorCoreDesc;
+
+namespace {
+
+    // Two triangles covering x in [0, 1], y in [-1, 1] at z = 0 (as in test_reference_executor).
+    struct TriangleGas {
+        DeviceBuffer vertices, output;
+        TraversableHandle handle = 0;
+        explicit TriangleGas(const Context& ctx) {
+            const float v[] = {0, -1, 0, 1, -1, 0, 1, 1, 0, 0, -1, 0, 1, 1, 0, 0, 1, 0};
+            vertices        = DeviceBuffer::fromHost(std::span<const float>(v));
+            CUdeviceptr vp  = vertices.ptr();
+            unsigned int geomFlags[1] = {OPTIX_GEOMETRY_FLAG_NONE};
+            OptixBuildInput bi{};
+            bi.type                              = OPTIX_BUILD_INPUT_TYPE_TRIANGLES;
+            bi.triangleArray.vertexBuffers       = &vp;
+            bi.triangleArray.numVertices         = 6;
+            bi.triangleArray.vertexFormat        = OPTIX_VERTEX_FORMAT_FLOAT3;
+            bi.triangleArray.vertexStrideInBytes = 3 * sizeof(float);
+            bi.triangleArray.flags               = geomFlags;
+            bi.triangleArray.numSbtRecords       = 1;
+            build(ctx, bi, OPTIX_BUILD_FLAG_PREFER_FAST_TRACE);
+        }
+        void build(const Context& ctx, const OptixBuildInput& bi, unsigned int flags) {
+            OptixAccelBuildOptions ao{};
+            ao.buildFlags = flags;
+            ao.operation  = OPTIX_BUILD_OPERATION_BUILD;
+            OptixAccelBufferSizes sizes{};
+            RTCD_OPTIX_CHECK(optixAccelComputeMemoryUsage(ctx.optixContext(), &ao, &bi, 1, &sizes));
+            DeviceBuffer temp(sizes.tempSizeInBytes);
+            output.allocate(sizes.outputSizeInBytes);
+            RTCD_OPTIX_CHECK(optixAccelBuild(ctx.optixContext(), nullptr, &ao, &bi, 1, temp.ptr(), temp.size(),
+                output.ptr(), output.size(), &handle, nullptr, 0));
+            RTCD_CUDA_CHECK(cudaDeviceSynchronize());
+        }
+        TriangleGas() = default;
+    };
+
+    // One sphere at (0.5, 0, 0), radius 0.25, built with kSphereGasFlags (the IS module must use the same flags).
+    constexpr unsigned int kSphereGasFlags = OPTIX_BUILD_FLAG_PREFER_FAST_TRACE;
+    struct SphereGas : TriangleGas {
+        DeviceBuffer centers, radii;
+        explicit SphereGas(const Context& ctx) {
+            const float c[] = {0.5f, 0.0f, 0.0f};
+            const float r[] = {0.25f};
+            centers         = DeviceBuffer::fromHost(std::span<const float>(c));
+            radii           = DeviceBuffer::fromHost(std::span<const float>(r));
+            CUdeviceptr cp  = centers.ptr();
+            CUdeviceptr rp  = radii.ptr();
+            unsigned int geomFlags[1] = {OPTIX_GEOMETRY_FLAG_NONE};
+            OptixBuildInput bi{};
+            bi.type                          = OPTIX_BUILD_INPUT_TYPE_SPHERES;
+            bi.sphereArray.vertexBuffers     = &cp;
+            bi.sphereArray.numVertices       = 1;
+            bi.sphereArray.radiusBuffers     = &rp;
+            bi.sphereArray.flags             = geomFlags;
+            bi.sphereArray.numSbtRecords     = 1;
+            build(ctx, bi, kSphereGasFlags);
+        }
+    };
+
+    class CoreTest : public ::testing::TestWithParam<HostDispatch> {
+    protected:
+        static constexpr std::uint32_t kStreams = 3;
+        static constexpr std::uint32_t kDof     = 2;
+        static constexpr std::uint32_t kBatch   = 5;
+        static constexpr std::uint32_t kMaxItems = 64;
+        std::shared_ptr<Context> ctx;
+        CheckerConfig cfg;
+        std::uint32_t fpi = 0;
+
+        void SetUp() override {
+            ctx                        = Context::create();
+            CheckerConfig c;
+            c.mode                     = Mode::LinearCurve; // items are trajectories: floatsPerItem = 3 * 2
+            c.curve.trajectoryPoints   = 3;
+            c.numStreams               = kStreams;
+            c.hostDispatch             = GetParam();
+            c.maxBatchSize             = kBatch;
+            c.maxItemsPerCheck         = kMaxItems;
+            c.optix                    = OptixOptions::release();
+            cfg                        = c.resolved();
+            fpi                        = static_cast<std::uint32_t>(cfg.itemLayout(kDof).floatsPerItem());
+        }
+
+        std::unique_ptr<DetectorCore> makeCore(FakeOptions opts, FakeBackend** fake, const CheckerConfig* config = nullptr) {
+            opts.dof = kDof;
+            DetectorCoreDesc d;
+            d.context       = ctx;
+            d.config        = config ? *config : cfg;
+            d.dof           = kDof;
+            d.lowerLimits   = {-1.0f, 0.5f};
+            d.upperLimits   = {1.0f, 2.5f};
+            d.createBackend = makeFactory(opts, fake);
+            return std::make_unique<DetectorCore>(std::move(d));
+        }
+
+        // item i: first float = first(i), the others noise
+        std::vector<float> items(std::uint32_t n, float (*first)(std::uint32_t), std::size_t stride = 0) const {
+            const std::size_t st = stride ? stride : fpi;
+            std::vector<float> v(std::size_t(n) * st, 0.5f);
+            for (std::uint32_t i = 0; i < n; ++i) {
+                v[std::size_t(i) * st]     = first(i);
+                v[std::size_t(i) * st + 1] = -3.0f;
+            }
+            return v;
+        }
+
+        static std::vector<std::uint32_t> counts(DetectorCore& core, const std::vector<float>& in, std::uint32_t n,
+            std::size_t stride = 0) {
+            std::vector<std::uint8_t> flags(n, 7);
+            std::vector<std::uint32_t> c(n, 12345);
+            core.checkHost(HostItems{in, n, stride}, flags, c);
+            for (std::uint32_t i = 0; i < n; ++i) {
+                EXPECT_EQ(flags[i], c[i] > 0 ? 1 : 0) << "item " << i;
+            }
+            return c;
+        }
+        static float plus100(std::uint32_t i) { return float(100 + i); }
+        static float times3(std::uint32_t i) { return float(3 * i + 1); }
+    };
+
+} // namespace
+
+// ---------------------------------------------------------------------------------------------------------------
+// Batch loop, stream mapping, threads, current context
+// ---------------------------------------------------------------------------------------------------------------
+
+TEST_P(CoreTest, BatchLoopOrderStreamMappingAndResults) {
+    FakeBackend* fake = nullptr;
+    FakeOptions o;
+    o.addValue = 7;
+    auto core  = makeCore(o, &fake);
+    ASSERT_NE(fake, nullptr);
+    ASSERT_EQ(fake->streams.size(), kStreams);
+    for (std::uint32_t s = 0; s < kStreams; ++s) {
+        EXPECT_EQ(fake->streams[s].index, s);
+        EXPECT_EQ(fake->streams[s].stream, core->streams()[s].stream);
+    }
+
+    const std::uint32_t n = 23; // 5 batches: 4 full + 3 items, streams 0 1 2 0 1
+    const auto in         = items(n, plus100);
+    for (int rep = 0; rep < 2; ++rep) { // second run: counters must be zeroed again
+        const auto c = counts(*core, in, n);
+        for (std::uint32_t i = 0; i < n; ++i) {
+            EXPECT_EQ(c[i], 107 + i) << "item " << i << " rep " << rep;
+        }
+    }
+    ASSERT_EQ(fake->begins.size(), 2u);
+    EXPECT_EQ(fake->begins[0].itemCount, n);
+    EXPECT_EQ(fake->begins[0].batchCount, 5u);
+    ASSERT_EQ(fake->calls.size(), 10u);
+
+    const std::thread::id caller = std::this_thread::get_id();
+    std::vector<std::vector<std::uint32_t>> perStream(kStreams);
+    for (std::size_t k = 0; k < 5; ++k) { // first check
+        const auto& c = fake->calls[k];
+        perStream[c.streamIndex].push_back(c.batch);
+        EXPECT_EQ(c.streamIndex, c.batch % kStreams);
+        EXPECT_EQ(c.stream, core->streams()[c.streamIndex].stream);
+        EXPECT_EQ(c.first, c.batch * kBatch);
+        EXPECT_EQ(c.count, c.batch < 4 ? kBatch : 3u);
+        EXPECT_EQ(c.itemsCount, std::size_t(c.count) * fpi);
+        EXPECT_EQ(c.hitCountsCount, c.count);
+        EXPECT_TRUE(c.contextCurrent) << "batch " << c.batch << ": the Context was not current in prepare()";
+        if (GetParam() == HostDispatch::SingleThread) {
+            EXPECT_EQ(c.thread, caller);
+            EXPECT_EQ(c.batch, k); // strictly in batch order
+        } else {
+            EXPECT_NE(c.thread, caller);
+            EXPECT_EQ(c.thread, core->workerThreadId(c.streamIndex)); // worker s runs stream s
+        }
+    }
+    // per stream: batches s, s + S, ... in order
+    EXPECT_EQ(perStream[0], (std::vector<std::uint32_t>{0, 3}));
+    EXPECT_EQ(perStream[1], (std::vector<std::uint32_t>{1, 4}));
+    EXPECT_EQ(perStream[2], (std::vector<std::uint32_t>{2}));
+    // stable staging / hit-count addresses per stream
+    for (std::size_t k = 5; k < 10; ++k) {
+        const auto& c = fake->calls[k];
+        for (std::size_t j = 0; j < 5; ++j) {
+            if (fake->calls[j].streamIndex == c.streamIndex) {
+                EXPECT_EQ(fake->calls[j].items, c.items);
+                EXPECT_EQ(fake->calls[j].hitCounts, c.hitCounts);
+            }
+        }
+    }
+
+    const CheckStats st = core->lastStats();
+    EXPECT_EQ(st.items, n);
+    EXPECT_EQ(st.batches, 5u);
+    EXPECT_EQ(st.launches, 5u);
+    EXPECT_EQ(st.hostSyncs, 0u);
+}
+
+TEST_P(CoreTest, PartialAndEmptyChecks) {
+    FakeBackend* fake = nullptr;
+    auto core         = makeCore({}, &fake);
+    const auto in     = items(kMaxItems, times3);
+    for (std::uint32_t n : {1u, 4u, 5u, 6u, 15u, 16u, 37u, 64u}) {
+        const auto c = counts(*core, in, n);
+        for (std::uint32_t i = 0; i < n; ++i) {
+            EXPECT_EQ(c[i], 3 * i + 1) << "n " << n << " item " << i;
+        }
+        EXPECT_EQ(core->lastStats().batches, (n + kBatch - 1) / kBatch);
+    }
+    const std::size_t beginsBefore = fake->begins.size();
+    core->checkHost(HostItems{in, 0, 0}, {}, {});
+    EXPECT_EQ(fake->begins.size(), beginsBefore); // nothing happens for an empty check
+    EXPECT_EQ(core->lastStats().items, 0u);
+    EXPECT_EQ(core->lastStats().batches, 0u);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Program-set handling
+// ---------------------------------------------------------------------------------------------------------------
+
+TEST_P(CoreTest, RaygenSelectionPerPlan) {
+    FakeBackend* fake = nullptr;
+    FakeOptions o;
+    o.addValue          = 1;
+    o.includeBatchIndex = true;
+    o.raygen            = [](std::uint32_t b) { return b % 2 == 0 ? kRaygenCopy : kRaygenCopyBatch; };
+    auto core  = makeCore(o, &fake);
+    const std::uint32_t n = 23;
+    const auto in         = items(n, plus100);
+    const auto c          = counts(*core, in, n);
+    for (std::uint32_t i = 0; i < n; ++i) {
+        const std::uint32_t b = i / kBatch;
+        EXPECT_EQ(c[i], b % 2 == 0 ? 101 + i : 100 + i + 1000 * (b + 1)) << "item " << i;
+    }
+}
+
+TEST_P(CoreTest, AnyHitClosestHitAndMissPrograms) {
+    TriangleGas gas(*ctx);
+    FakeBackend* fake = nullptr;
+    FakeOptions o;
+    o.traversable = gas.handle;
+    o.raygen      = [](std::uint32_t b) { return b % 2 == 0 ? kRaygenTrace : kRaygenTraceChMiss; };
+    auto core     = makeCore(o, &fake);
+    // x = 0.25 / 0.75 hit one triangle each, 1.5 and -0.5 miss
+    const std::uint32_t n = 17;
+    const auto in         = items(n, [](std::uint32_t i) {
+        const float xs[] = {0.25f, 1.5f, 0.75f, -0.5f};
+        return xs[i % 4];
+    });
+    const auto c = counts(*core, in, n);
+    for (std::uint32_t i = 0; i < n; ++i) {
+        const bool hit = i % 4 == 0 || i % 4 == 2;
+        if ((i / kBatch) % 2 == 0) {
+            EXPECT_EQ(c[i], hit ? 1u : 0u) << "any-hit, item " << i;
+        } else {
+            EXPECT_EQ(c[i], hit ? 5u : 3u) << "closest-hit / miss, item " << i;
+        }
+    }
+}
+
+TEST_P(CoreTest, BuiltinSphereIntersection) {
+    SphereGas gas(*ctx);
+    FakeBackend* fake = nullptr;
+    FakeOptions o;
+    o.traversable  = gas.handle;
+    o.raygen       = [](std::uint32_t) { return kRaygenTrace; };
+    o.editPrograms = [](ProgramSet& ps) {
+        ps.builtinIntersection = BuiltinIntersection::Sphere;
+        ps.builtinIsBuildFlags = kSphereGasFlags;
+        ps.primitiveTypes      = kPrimitiveSphere;
+    };
+    auto core             = makeCore(o, &fake);
+    const std::uint32_t n = 12;
+    const auto in         = items(n, [](std::uint32_t i) {
+        const float xs[] = {0.5f, 0.1f, 0.6f, 0.9f};
+        return xs[i % 4];
+    });
+    const auto c = counts(*core, in, n);
+    for (std::uint32_t i = 0; i < n; ++i) {
+        const bool hit = i % 4 == 0 || i % 4 == 2;
+        EXPECT_EQ(c[i] > 0, hit) << "item " << i << " count " << c[i];
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Param-upload cache, launch == false, host-sync stats
+// ---------------------------------------------------------------------------------------------------------------
+
+TEST_P(CoreTest, ParamUploadCache) {
+    FakeBackend* fake = nullptr;
+    FakeOptions o;
+    o.addValue = 2;
+    auto core  = makeCore(o, &fake);
+    const auto in = items(kMaxItems, times3);
+    auto expectOk = [&](std::uint32_t n) {
+        const auto c = counts(*core, in, n);
+        for (std::uint32_t i = 0; i < n; ++i) {
+            EXPECT_EQ(c[i], 3 * i + 3) << "n " << n << " item " << i;
+        }
+    };
+    // 30 items = 6 full batches, 2 per stream; per stream the params are identical for all of them.
+    expectOk(30);
+    EXPECT_EQ(core->lastStats().paramUploads, kStreams);
+    expectOk(30);
+    EXPECT_EQ(core->lastStats().paramUploads, 0u); // the cache survives across checks
+    expectOk(28); // batch 5 (stream 2) has 3 items: one new upload
+    EXPECT_EQ(core->lastStats().paramUploads, 1u);
+    expectOk(30); // stream 2 batch 2 differs from the cached 3-item params again; batch 5 then matches
+    EXPECT_EQ(core->lastStats().paramUploads, 1u);
+    EXPECT_EQ(core->lastStats().launches, 6u);
+
+    FakeBackend* fake2 = nullptr;
+    FakeOptions o2;
+    o2.includeBatchIndex = true; // every batch's params differ
+    o2.raygen            = [](std::uint32_t) { return kRaygenCopyBatch; };
+    auto core2           = makeCore(o2, &fake2);
+    for (int rep = 0; rep < 2; ++rep) {
+        const auto c = counts(*core2, in, 30);
+        for (std::uint32_t i = 0; i < 30; ++i) {
+            EXPECT_EQ(c[i], 3 * i + 1 + 1000 * (i / kBatch + 1)) << "item " << i;
+        }
+        EXPECT_EQ(core2->lastStats().paramUploads, 6u);
+    }
+}
+
+TEST_P(CoreTest, LaunchFalseAndHostSyncStats) {
+    FakeBackend* fake = nullptr;
+    FakeOptions o;
+    o.skipBatch     = 1;      // items 5 .. 9
+    o.syncThreshold = kBatch; // full batches "synchronize the host"
+    auto core       = makeCore(o, &fake);
+    const std::uint32_t n = 28;
+    const auto in         = items(n, [](std::uint32_t i) { return float(i + 1); });
+    for (int rep = 0; rep < 2; ++rep) {
+        const auto c = counts(*core, in, n);
+        for (std::uint32_t i = 0; i < n; ++i) {
+            EXPECT_EQ(c[i], (i >= 5 && i < 10) ? 0u : i + 1) << "item " << i;
+        }
+        const CheckStats st = core->lastStats();
+        EXPECT_EQ(st.batches, 6u);
+        EXPECT_EQ(st.launches, 5u);
+        EXPECT_EQ(st.hostSyncs, 5u); // the 5 full batches
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------------------------------------------
+
+TEST_P(CoreTest, CapacityAndArgumentErrorsBeforeGpuWork) {
+    FakeBackend* fake = nullptr;
+    auto core         = makeCore({}, &fake);
+    const auto in     = items(kMaxItems + 1, times3);
+    std::vector<std::uint8_t> flags(kMaxItems + 1);
+    std::vector<std::uint32_t> hc(kMaxItems + 1);
+
+    EXPECT_THROW(core->checkHost(HostItems{in, kMaxItems + 1, 0}, flags, hc), CapacityError);
+    EXPECT_THROW(core->checkHost(HostItems{std::span<const float>(in.data(), 10), 5, 0}, flags, hc), InvalidArgument);
+    EXPECT_THROW(core->checkHost(HostItems{in, 5, fpi - 1}, flags, hc), InvalidArgument); // stride < floatsPerItem
+    EXPECT_THROW(core->checkHost(HostItems{{}, 5, 0}, flags, hc), InvalidArgument);          // null data
+    EXPECT_THROW(core->checkHost(HostItems{in, 5, 0}, std::span<std::uint8_t>(flags.data(), 4), hc), InvalidArgument);
+    EXPECT_THROW(core->checkHost(HostItems{in, 5, 0}, flags, std::span<std::uint32_t>(hc.data(), 4)), InvalidArgument);
+    // strided view one float short
+    EXPECT_THROW(core->checkHost(HostItems{std::span<const float>(in.data(), 4 * (fpi + 1) + fpi - 1), 5, fpi + 1}, flags, hc),
+        InvalidArgument);
+
+    DeviceBuffer dItems(std::size_t(kMaxItems + 1) * fpi * sizeof(float));
+    DeviceBuffer dHits(std::size_t(kMaxItems + 1) * sizeof(std::uint32_t));
+    EXPECT_THROW(core->checkDevice(DeviceItems{dItems.ptr(), kMaxItems + 1, 0}, dHits.span<std::uint32_t>()), CapacityError);
+    EXPECT_THROW(core->checkDevice(DeviceItems{0, 5, 0}, dHits.span<std::uint32_t>()), InvalidArgument);
+    EXPECT_THROW(core->checkDevice(DeviceItems{dItems.ptr() + 2, 5, 0}, dHits.span<std::uint32_t>()), InvalidArgument);
+    EXPECT_THROW(core->checkDevice(DeviceItems{dItems.ptr(), 5, 0}, DeviceSpan<std::uint32_t>{dHits.ptr(), 4}),
+        InvalidArgument);
+    EXPECT_THROW(core->checkDevice(DeviceItems{dItems.ptr(), 5, 0}, DeviceSpan<std::uint32_t>{0, 5}), InvalidArgument);
+    EXPECT_THROW(core->checkDevice(DeviceItems{dItems.ptr(), 5, 1}, dHits.span<std::uint32_t>()), InvalidArgument);
+
+    EXPECT_TRUE(fake->begins.empty()); // nothing reached the backend
+    EXPECT_TRUE(fake->calls.empty());
+    const auto c = counts(*core, in, 9); // still usable
+    for (std::uint32_t i = 0; i < 9; ++i) {
+        EXPECT_EQ(c[i], 3 * i + 1);
+    }
+}
+
+TEST_P(CoreTest, PrepareErrorDrainsStreamsAndRethrowsOnCaller) {
+    FakeBackend* fake = nullptr;
+    FakeOptions o;
+    o.raygen       = [](std::uint32_t b) { return b == 0 ? kRaygenSpin : kRaygenCopy; };
+    o.spinCycles   = 400'000'000; // ~0.15-0.2 s on stream 0: still running when batch 2 fails, unless drained
+    o.throwAtBatch = 2;
+    auto core      = makeCore(o, &fake);
+    const std::uint32_t n = 40;
+    const auto in         = items(n, times3);
+    std::vector<std::uint8_t> flags(n);
+    try {
+        core->checkHost(HostItems{in, n, 0}, flags, {});
+        ADD_FAILURE() << "no exception";
+    } catch (const InvalidArgument& e) {
+        EXPECT_NE(std::string(e.what()).find("fake prepare failure at batch 2"), std::string::npos) << e.what();
+    }
+    for (const StreamContext& s : core->streams()) {
+        EXPECT_EQ(cudaStreamQuery(s.stream), cudaSuccess) << "stream " << s.index << " not drained";
+    }
+    if (GetParam() == HostDispatch::SingleThread) {
+        EXPECT_EQ(fake->calls.size(), 3u); // batches 0, 1, 2: nothing after the failure
+    }
+}
+
+TEST_P(CoreTest, ErrorsLeaveTheCheckerUsable) {
+    FakeBackend* fake = nullptr;
+    FakeOptions o;
+    o.throwAtBatch = 3;
+    auto core      = makeCore(o, &fake);
+    const auto in  = items(kMaxItems, times3);
+    std::vector<std::uint8_t> flags(kMaxItems);
+    EXPECT_THROW(core->checkHost(HostItems{in, 30, 0}, flags, {}), InvalidArgument);
+    // fewer batches: batch 3 never happens, results are right
+    const auto c = counts(*core, in, 15);
+    for (std::uint32_t i = 0; i < 15; ++i) {
+        EXPECT_EQ(c[i], 3 * i + 1);
+    }
+
+    FakeBackend* fake2 = nullptr;
+    FakeOptions o2;
+    o2.throwInBeginCheck = true;
+    auto core2           = makeCore(o2, &fake2);
+    EXPECT_THROW(core2->checkHost(HostItems{in, 10, 0}, flags, {}), UnsupportedError);
+    EXPECT_TRUE(fake2->calls.empty());
+
+    FakeBackend* fake3 = nullptr;
+    FakeOptions o3;
+    o3.badRaygen = 1; // plan.raygen = 99: a backend bug
+    auto core3   = makeCore(o3, &fake3);
+    try {
+        core3->checkHost(HostItems{in, 20, 0}, flags, {});
+        ADD_FAILURE() << "no exception";
+    } catch (const Error& e) {
+        EXPECT_EQ(e.kind(), ErrorKind::Internal) << e.what();
+    }
+    for (const StreamContext& s : core3->streams()) {
+        EXPECT_EQ(cudaStreamQuery(s.stream), cudaSuccess);
+    }
+}
+
+TEST_P(CoreTest, ConstructionErrors) {
+    {
+        DetectorCoreDesc d;
+        d.context       = ctx;
+        d.config        = cfg;
+        d.dof           = kDof;
+        d.createBackend = [](const BackendCreateInfo&) -> std::unique_ptr<Backend> { return nullptr; };
+        try {
+            DetectorCore core(std::move(d));
+            ADD_FAILURE() << "no exception";
+        } catch (const Error& e) {
+            EXPECT_EQ(e.kind(), ErrorKind::Internal);
+        }
+    }
+    {
+        DetectorCoreDesc d;
+        d.context       = ctx;
+        d.config        = cfg;
+        d.dof           = kDof;
+        d.createBackend = [](const BackendCreateInfo&) -> std::unique_ptr<Backend> {
+            throw ConfigError("fake factory failure", "ray.launch_width_cap");
+        };
+        EXPECT_THROW(DetectorCore core(std::move(d)), ConfigError);
+    }
+    FakeOptions wrongMode;
+    wrongMode.forceReportedMode = true;
+    wrongMode.reportedMode      = Mode::Ray;
+    EXPECT_THROW(makeCore(wrongMode, nullptr), Error);
+
+    FakeOptions noRaygen;
+    noRaygen.editPrograms = [](ProgramSet& ps) { ps.raygens.clear(); };
+    EXPECT_THROW(makeCore(noRaygen, nullptr), Error);
+
+    FakeOptions badEntry;
+    badEntry.editPrograms = [](ProgramSet& ps) { ps.raygens = {"__raygen__doesNotExist"}; };
+    EXPECT_THROW(makeCore(badEntry, nullptr), OptixError);
+
+    FakeOptions sphereWithoutType;
+    sphereWithoutType.editPrograms = [](ProgramSet& ps) { ps.builtinIntersection = BuiltinIntersection::Sphere; };
+    EXPECT_THROW(makeCore(sphereWithoutType, nullptr), Error);
+
+    // the Context is still fine
+    FakeBackend* fake = nullptr;
+    auto core         = makeCore({}, &fake);
+    const auto in     = items(4, times3);
+    EXPECT_EQ(counts(*core, in, 4)[3], 10u);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Device path, strided input, warmup
+// ---------------------------------------------------------------------------------------------------------------
+
+TEST_P(CoreTest, CheckDeviceAndStridedInput) {
+    FakeBackend* fake = nullptr;
+    FakeOptions o;
+    o.addValue = 4;
+    auto core  = makeCore(o, &fake);
+    const std::uint32_t n      = 37;
+    const std::size_t stride   = fpi + 3;
+    const auto packed          = items(n, plus100);
+    const auto strided         = items(n, plus100, stride);
+
+    const auto cPacked  = counts(*core, packed, n);
+    const auto cStrided = counts(*core, strided, n, stride);
+    EXPECT_EQ(cPacked, cStrided);
+
+    for (std::size_t st : {std::size_t(0), stride}) {
+        const auto& host = st ? strided : packed;
+        DeviceBuffer dItems = DeviceBuffer::fromHost(std::span<const float>(host));
+        DeviceBuffer dHits(std::size_t(n + 4) * sizeof(std::uint32_t));
+        std::vector<std::uint32_t> init(n + 4, 0xdeadbeef);
+        dHits.upload(init.data(), init.size() * sizeof(std::uint32_t));
+        core->checkDevice(DeviceItems{dItems.ptr(), n, st}, DeviceSpan<std::uint32_t>{dHits.ptr(), n + 4});
+        std::vector<std::uint32_t> out(n + 4);
+        dHits.download(out.data(), out.size() * sizeof(std::uint32_t));
+        for (std::uint32_t i = 0; i < n; ++i) {
+            EXPECT_EQ(out[i], 104 + i) << "stride " << st << " item " << i;
+        }
+        for (std::uint32_t i = n; i < n + 4; ++i) {
+            EXPECT_EQ(out[i], 0xdeadbeefu) << "written past items.count";
+        }
+        EXPECT_EQ(core->lastStats().items, n);
+    }
+}
+
+TEST_P(CoreTest, WarmupRunsOneFullCapacityCheck) {
+    FakeBackend* fake = nullptr;
+    auto core         = makeCore({}, &fake);
+    core->warmup();
+    ASSERT_EQ(fake->begins.size(), 1u);
+    EXPECT_EQ(fake->begins[0].itemCount, kStreams * kBatch);
+    EXPECT_EQ(core->lastStats().batches, kStreams);
+
+    CheckerConfig small = cfg;
+    small.maxItemsPerCheck = 7; // capped at maxItemsPerCheck
+    FakeBackend* fake2 = nullptr;
+    auto core2         = makeCore({}, &fake2, &small);
+    core2->warmup();
+    ASSERT_EQ(fake2->begins.size(), 1u);
+    EXPECT_EQ(fake2->begins[0].itemCount, 7u);
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Cross-check with the single-thread ReferenceBatchRunner (tests/support) on the same fake backend
+// ---------------------------------------------------------------------------------------------------------------
+
+TEST_P(CoreTest, SameResultsAsReferenceBatchRunner) {
+    TriangleGas gas(*ctx);
+    for (int variant = 0; variant < 3; ++variant) {
+        FakeOptions o;
+        o.dof               = kDof;
+        o.addValue          = 3;
+        o.traversable       = gas.handle;
+        o.includeBatchIndex = variant == 1;
+        o.skipBatch         = variant == 2 ? 2u : ~0u;
+        o.raygen            = [variant](std::uint32_t b) {
+            if (variant == 0) {
+                return b % 3 == 0 ? kRaygenTrace : b % 3 == 1 ? kRaygenTraceChMiss : kRaygenCopy;
+            }
+            return variant == 1 ? kRaygenCopyBatch : kRaygenCopy;
+        };
+
+        FakeBackend* fake = nullptr;
+        auto core         = makeCore(o, &fake);
+
+        StreamLease lease = ctx->acquireStreams(kStreams);
+        std::vector<StreamContext> sc;
+        for (std::uint32_t i = 0; i < kStreams; ++i) {
+            sc.push_back(StreamContext{i, lease[i]});
+        }
+        BackendCreateInfo info;
+        info.context = ctx;
+        info.config  = &cfg;
+        info.streams = sc;
+        FakeBackend refBackend(info, o);
+        internal::ReferenceExecutor exec(ctx, refBackend.programs(), cfg.optix);
+        internal::ReferenceBatchRunner runner(ctx, refBackend, exec, cfg, sc, kDof);
+
+        const auto in = items(kMaxItems, [](std::uint32_t i) {
+            const float xs[] = {0.25f, 1.5f, 0.75f, -0.5f, 7.0f};
+            return xs[i % 5];
+        });
+        for (std::uint32_t n : {1u, 5u, 14u, 15u, 16u, 37u, 64u}) {
+            const std::vector<std::uint32_t> expected = runner.runAll(in, n);
+            const std::vector<std::uint32_t> got      = counts(*core, in, n);
+            EXPECT_EQ(got, expected) << "variant " << variant << " n " << n;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Host-only helpers
+// ---------------------------------------------------------------------------------------------------------------
+
+TEST(DetectorWarmupItems, DeterministicWithinLimits) {
+    const ItemLayout layout{3, 4};
+    const std::vector<float> lo = {-1.0f, 0.0f, 0.0f};
+    const std::vector<float> hi = {1.0f, 0.5f, 0.0f}; // joint 2: empty range -> [-pi, pi]
+    const auto a = detail::makeWarmupItems(layout, 50, lo, hi);
+    const auto b = detail::makeWarmupItems(layout, 50, lo, hi);
+    ASSERT_EQ(a.size(), 50u * 12u);
+    EXPECT_EQ(a, b);
+    bool varied = false;
+    for (std::size_t k = 0; k < a.size(); ++k) {
+        const std::size_t j = k % 3;
+        const float l = j == 2 ? -3.1416f : lo[j], h = j == 2 ? 3.1416f : hi[j];
+        EXPECT_GE(a[k], l);
+        EXPECT_LE(a[k], h);
+        varied = varied || a[k] != a[j];
+    }
+    EXPECT_TRUE(varied);
+}
+
+INSTANTIATE_TEST_SUITE_P(Dispatch, CoreTest, ::testing::Values(HostDispatch::SingleThread, HostDispatch::ThreadPerStream),
+    [](const ::testing::TestParamInfo<HostDispatch>& p) {
+        return p.param == HostDispatch::SingleThread ? std::string("SingleThread") : std::string("ThreadPerStream");
+    });
