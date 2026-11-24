@@ -1,9 +1,10 @@
 # RTCD new stack: interface design (Stage 0-B, amended in Stage 0-C)
 
-> **FROZEN as of the Stage 0-C commit on branch `optix9-upgrade`** (the commit that adds this note; Stage 0-C
-> was based on `c46667d`). From here on the contract -- every header under `include/rtcd/` (public and
-> `internal/`) and this document -- is changed only by main. **Change procedure:** a module agent that needs a
-> header change does not make it; it sends main a request naming the file, the exact declaration (old and new
+> **FROZEN as of commit `b4948ee` on branch `optix9-upgrade`** (the merge of Stage 0-C; Stage 0-C was based on
+> `c46667d`).
+> Since then: comment-only clarifications at Wave-1 close-out.
+> From here on the contract -- every header under `include/rtcd/` (public and `internal/`) and this document --
+> is changed only by main. **Change procedure:** a module agent that needs a header change does not make it; it sends main a request naming the file, the exact declaration (old and new
 > text) and the reason. Main decides, applies the change in one commit to the contract, updates this document in
 > the same commit, and tells every affected agent. Implementation files, private headers under `src/<module>/`
 > and tests stay with their owners (section 8).
@@ -166,7 +167,10 @@ Purpose: host geometry values. `TriangleMesh` documents exactly what the loader 
 ray sets and OBBs feed the goldens. `Transform::fromXyzRpy` uses the URDF convention `Rz(y) Ry(p) Rx(r)`.
 Free functions of `rtcd_geometry` (added in Stage 0-C as the seam to `rtcd_scene` and `rtcd_robot`):
 `loadObjMesh(file, pose = identity, scale = 1)` (dedup on the positions as read, then `pose * (scale * v)` with the
-old float results), `computeEdges(TriangleMesh&)` (unique + loop edges + watertight from the triangles; used again
+old float results; with identity pose and scale 1 the vertices are returned exactly as read, with no arithmetic,
+which preserves the -0.0f coordinates of the Panda link0 / link5 / link6 meshes that the goldens depend on; any
+other pose / scale applies `vertex *= scale`, then the affine transform, in float, in that order),
+`computeEdges(TriangleMesh&)` (unique + loop edges + watertight from the triangles; used again
 by `rtcd_robot` after merging fixed links), `fitObb(span<const Vec3>)` (= `computeBestFittingOBB`),
 `loadSpheres(file, format = "xyzr")` (the "xyzr" rules of 3.9).
 Ownership: values; functions are reentrant, host only. Errors: `IoError`, `InvalidArgument`, `UnsupportedError`
@@ -229,6 +233,8 @@ mesh filename)` (old rule; `link7_nohand.obj` comes from the URDF visual element
 else `spheres.dir / <linkName>.txt`. Sphere format "xyzr": one `x y z r` per line, `#` comments and blank lines
 skipped, anything else is an `IoError` with line number (the current Panda files match:
 `models/franka_description/spheres/panda_link0.txt` ... `panda_link7.txt`, 62 spheres in total).
+Merged fixed links are appended in "URDF order", which is the order of urdfdom's child-joint container, i.e.
+sorted by joint name, not file order.
 Link OBB: old `computeBestFittingOBB`, not collapsed (collapse is a checker option applied by backends).
 Ownership: host only, no device memory: each backend uploads what it needs. Threading: const thread-safe.
 Errors: `IoError`, `UnsupportedError`, `InvalidArgument`.

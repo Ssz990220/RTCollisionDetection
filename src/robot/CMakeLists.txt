@@ -1,7 +1,6 @@
 # rtcd_robot (Wave 1 d): include/rtcd/robot_model.h (URDF via urdfdom -> chain -> KinematicsTable; link geometry
 # through rtcd_geometry) and include/rtcd/internal/kinematics.h (FK / OBB / trajectory kernels, .cu files here).
 add_library(rtcd_robot STATIC
-  placeholder.cpp
   urdf_chain.h
   urdf_chain.cpp
   robot_model.cpp
