@@ -1,6 +1,6 @@
 #pragma once
 // rtcd/internal/kinematics.h -- forward-kinematics kernels over a KinematicsTable (rtcd/limits.h), shared by the
-// mesh, ray and curve backends. Library rtcd_geometry (Wave 1 c, which also owns the table loader).
+// mesh, ray and curve backends. Library rtcd_robot (src/robot, Wave 1 d, which also owns the table loader).
 // INTERNAL contract.
 //
 // The table lives in a DEVICE buffer (one per robot per owner; uploadKinematics() creates it), never in
@@ -26,7 +26,7 @@ namespace rtcd::internal {
     // Both views of ONE table: `host` is the RobotModel's table (launch configuration reads dof / numLinks from
     // it; an implementation may also pass it by value as a __grid_constant__ kernel parameter), `device` its copy
     // made by uploadKinematics(). Both must describe the same table and outlive the enqueued work (`device`) /
-    // the call (`host`). Which one the kernels read is an implementation choice of rtcd_geometry (see
+    // the call (`host`). Which one the kernels read is an implementation choice of rtcd_robot (see
     // docs/design/interfaces.md, open question Q1); callers always pass both.
     struct KinematicsRef {
         const KinematicsTable* host = nullptr;

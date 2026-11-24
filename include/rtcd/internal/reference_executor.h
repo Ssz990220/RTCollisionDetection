@@ -1,6 +1,7 @@
 #pragma once
-// rtcd/internal/reference_executor.h -- test-support executor (library rtcd_testsupport, Wave 1 d): builds an
-// OptiX pipeline + SBT from a backend's ProgramSet and runs LaunchPlans, independently of the detector core.
+// rtcd/internal/reference_executor.h -- test-support executor (library rtcd_testsupport, tests/support,
+// Wave 1 e): builds an OptiX pipeline + SBT from a backend's ProgramSet and runs LaunchPlans, independently of
+// the detector core.
 // Lets the Wave 2 backend agents test prepare() + programs end to end before (and as a cross-check of) the
 // detector core. Not used by the library. Simple on purpose: always uploads params, one pipeline.
 //

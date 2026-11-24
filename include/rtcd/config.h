@@ -17,7 +17,7 @@
 //     what() lists EVERY violated rule, one per line, each prefixed with the field's dotted JSON path; field()
 //     is the first offending path.
 //   * resolved() = validate() + a copy with every Auto / "per-mode default" value replaced by its effective
-//     value (Toggle::Auto, EdgeSet via sceneEdges, autoRefitMaxBatches < 0, ...). The checker stores and reports
+//     value (Toggle::Auto, EdgeSet via sceneEdges, autoRefitMaxBatches < 0, curve.geometryFlags, ...). The checker stores and reports
 //     the resolved copy (CollisionChecker::config(), dumpCheckerConfig()).
 //   * Checks that need the robot, the scene or files (e.g. RAY launch size, spline weight file present) run in
 //     the CollisionChecker constructor and throw ConfigError / IoError / CapacityError there.
@@ -134,10 +134,14 @@ namespace rtcd {
         // [runtime] "auto_refit_max_batches": threshold of RefitPolicy::Auto. < 0 = per-degree default
         // (resolved): linear 2, quadratic 1, cubic 1 (measured BM_CURVE_Shelf, batch 16).
         std::int32_t autoRefitMaxBatches = -1;
-        // [runtime] "geometry_flags": curve build-input geometry flag: kGeometryFlagNone (default) or
-        // kGeometryFlagRequireSingleAnyHitCall (disables curve segment splitting; changes cost and hit counts,
-        // never flags). JSON: "none" | "single_anyhit".
-        GeometryFlags geometryFlags = kGeometryFlagNone;
+        // [runtime] "geometry_flags": curve build-input geometry flag. nullopt ("auto", default) = per-degree
+        // default (resolved): kGeometryFlagRequireSingleAnyHitCall for quadratic curves, kGeometryFlagNone for
+        // linear and cubic (old curveDefaultGeometryFlags, RTCD/Robot/batchCurveRobot.h; QUAD measured 1.3-2x
+        // faster with identical flags). Explicit values: kGeometryFlagNone ("none") or
+        // kGeometryFlagRequireSingleAnyHitCall ("single_anyhit"; disables curve segment splitting, changes cost
+        // and hit counts, never flags). JSON: "auto" | "none" | "single_anyhit". resolved() always sets it (for the
+        // non-curve modes to kGeometryFlagNone, unused); validate() accepts only nullopt or the two values above.
+        std::optional<GeometryFlags> geometryFlags;
         // [runtime] "spline_weights_dir": directory holding <degree name>/<end points>/<control>_<trajectory>.txt
         // (degree name "quad" / "cubic", end points "normal" / "repeated" / "phantom"). Required for quadratic and
         // cubic curves; the JSON loader resolves it relative to the config file. Empty = not set.

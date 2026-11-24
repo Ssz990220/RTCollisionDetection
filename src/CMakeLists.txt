@@ -1,27 +1,37 @@
-# New-stack modules. Dependency direction (a module may only depend on modules above it):
+# New-stack libraries (docs/design/interfaces.md, section 2). Dependency direction (a library may only depend on
+# libraries above it; wave / agent in brackets):
 #
-#   rtcd_core      context, streams, device buffers, errors, CUDA algorithms
-#   rtcd_geometry  mesh loading, OBB, edges                        -> core
-#   rtcd_robot     robot model (URDF), kinematics kernels           -> geometry
-#   rtcd_scene     obstacles, scene GAS, edge rays                  -> geometry
-#   rtcd_programs  OptiX IR device programs (embedded)              (OptiX headers, include/ only)
-#   rtcd_detect    backends, pipeline, CollisionChecker             -> robot, scene, programs
-#   rtcd_config    JSON -> config structs                           (include/ + nlohmann-json only)
+#   rtcd_core           errors, Logger, device buffers, Context, internal algorithms / accel   [1a]  CUDA, OptiX
+#   rtcd_config         CheckerConfig validate / resolved                                      [1b]  (nothing)
+#   rtcd_json           JSON <-> config / scene / robot descriptions                            [1b]  -> config, nlohmann-json
+#   rtcd_geometry       OBJ mesh loading, edges, OBB fit, sphere files                          [1c]  -> core
+#   rtcd_scene          Scene: obstacle GASes + IAS, edge rays, obstacle OBBs                   [1c]  -> geometry
+#   rtcd_robot          RobotModel (URDF), kinematics kernels                                   [1d]  -> geometry
+#   rtcd_backend_mesh   createMeshBackend + embedded OptiX IR                                   [2f]  -> robot, scene
+#   rtcd_backend_ray    createRayBackend + embedded OptiX IR                                    [2g]  -> robot, scene
+#   rtcd_backend_curve  createCurveBackend + embedded OptiX IR, curve kernels                   [2h]  -> robot, scene
+#   rtcd_detector       CollisionChecker: pipeline, SBT, batch loop, dispatch                   [2e]  -> config, backends
+#   (rtcd_testsupport   tests/support: reference executor, cached inputs / goldens              [1e]  -> robot, scene)
 #
-# Every module target gets include/ on its PUBLIC include path; private headers stay in src/<module>/ and are
-# reached through the module's PRIVATE include path (src/). No global include_directories, no CU_SRC-style
-# source lists: a .cu belongs to exactly one module and is compiled once.
-# Placeholder sources (placeholder.cpp / placeholder.cu) only exist so the skeleton builds; delete a module's
+# Every library gets include/ on its PUBLIC include path; private headers stay in src/<module>/ and are reached
+# through the PRIVATE include path (src/). No global include_directories, no CU_SRC-style source lists: a .cu
+# belongs to exactly one library and is compiled once. Each backend embeds its own OptiX programs with
+# rtcd_add_optix_ir (cmake/RTCDTargets.cmake); there is no shared programs library.
+# Placeholder sources (placeholder.cpp / placeholder.cu) only exist so the skeleton builds; delete a library's
 # placeholder when the first real source is added.
 
 add_subdirectory(core)
-add_subdirectory(geometry)
-add_subdirectory(robot)
-add_subdirectory(scene)
-add_subdirectory(programs)
-add_subdirectory(detect)
 add_subdirectory(config)
+add_subdirectory(json)
+add_subdirectory(geometry)
+add_subdirectory(scene)
+add_subdirectory(robot)
+add_subdirectory(backend_mesh)
+add_subdirectory(backend_ray)
+add_subdirectory(backend_curve)
+add_subdirectory(detector)
 
-# Convenience target for apps and tests: the whole public library.
+# Umbrella target for apps and tests: the whole public library.
 add_library(rtcd INTERFACE)
-target_link_libraries(rtcd INTERFACE rtcd_detect rtcd_config)
+target_link_libraries(rtcd INTERFACE
+  rtcd_detector rtcd_backend_mesh rtcd_backend_ray rtcd_backend_curve rtcd_config rtcd_json)

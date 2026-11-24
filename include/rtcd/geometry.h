@@ -1,6 +1,7 @@
 #pragma once
 // rtcd/geometry.h -- host-side geometry value types shared by the robot model, the scene and the backends:
-// rigid transforms, triangle meshes with their edge sets, spheres. Plain data; trivial inline helpers only.
+// rigid transforms, triangle meshes with their edge sets, spheres (plain data, trivial inline helpers), plus the
+// mesh / sphere loaders and the OBB fit of library rtcd_geometry (declared at the end).
 //
 // Units: meters and radians. Frames: a link's geometry is expressed in that link's frame; obstacles in the world.
 
@@ -9,6 +10,9 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
+#include <span>
+#include <string_view>
 #include <vector>
 
 namespace rtcd {
@@ -94,5 +98,32 @@ namespace rtcd {
         Vec3 center{0, 0, 0}; // in the link frame
         float radius = 0;
     };
+
+    // -----------------------------------------------------------------------------------------------------------
+    // Geometry I/O and fitting: library rtcd_geometry (src/geometry, Wave 1 c). Host only, no GPU, no Context.
+    // These are the seam between rtcd_geometry and its users rtcd_scene (obstacles) and rtcd_robot (link meshes,
+    // spheres, link OBBs). Reentrant.
+    // -----------------------------------------------------------------------------------------------------------
+
+    // Loads an OBJ file (tinyobjloader, triangulate) exactly as the old RTCD::meshModel::loadOBJ (rules at
+    // TriangleMesh): vertices are deduplicated on the positions AS READ from the file; afterwards every vertex
+    // becomes pose * (scale * v) (old meshModel(path, transform, scale); the implementation must reproduce the
+    // old float results of `vertex *= scale; transformPoint(vertex, Eigen::Affine3f)`); edges and loop edges by
+    // computeEdges(). Throws IoError (missing / unreadable / not OBJ) and InvalidArgument (scale <= 0).
+    TriangleMesh loadObjMesh(const std::filesystem::path& file, const Transform& pose = Transform{}, float scale = 1.0f);
+
+    // Recomputes mesh.uniqueEdges, mesh.loopEdges and mesh.watertight from mesh.triangles (old loadOBJ edge and
+    // loop-edge construction; edges are topology only, vertex positions are not read). Used by loadObjMesh and by
+    // rtcd_robot after merging link meshes.
+    void computeEdges(TriangleMesh& mesh);
+
+    // Best-fitting OBB of a point set, exactly the old computeBestFittingOBB (RTCD/Meshes/Obb.h). Throws
+    // InvalidArgument for an empty set.
+    Obb fitObb(std::span<const Vec3> points);
+
+    // Reads a sphere file. format "xyzr" only (UnsupportedError otherwise): UTF-8 text, one "x y z r" per line,
+    // empty lines and lines starting with '#' skipped, anything else IoError(file, line); r > 0 required
+    // (IoError(file, line)); missing file IoError. File order is kept. An empty file gives an empty vector.
+    std::vector<Sphere> loadSpheres(const std::filesystem::path& file, std::string_view format = "xyzr");
 
 } // namespace rtcd

@@ -45,6 +45,9 @@ add_subdirectory(RTCD)
 
 # ---- new stack: include/rtcd (public headers), src/<module>, apps/, tests/ ----
 add_subdirectory(src)
+# rtcd_testsupport (tests/support) is used by the tests AND by apps (regression app, benchmarks), so it is
+# configured even with BUILD_TESTS=OFF; tests/CMakeLists.txt excludes it from its own folder scan.
+add_subdirectory(tests/support)
 add_subdirectory(apps)
 if (BUILD_TESTS)
   add_subdirectory(tests)

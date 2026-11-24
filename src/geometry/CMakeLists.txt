@@ -1,4 +1,5 @@
-# rtcd_geometry: mesh loading (tiny_obj_loader), OBB, edges.
+# rtcd_geometry (Wave 1 c): the free functions of include/rtcd/geometry.h -- OBJ mesh loading reproducing the
+# old meshModel::loadOBJ (tiny_obj_loader), unique / loop edges, best-fit OBB, sphere-file I/O. Host only.
 add_library(rtcd_geometry STATIC
   placeholder.cpp
 )

@@ -107,12 +107,18 @@ function(rtcd_add_app name)
   rtcd_register_new_target(${name})
 endfunction()
 
+# rtcd_add_child_directories([EXCLUDE <dir>...])
 # add_subdirectory() for every direct child of the current source dir that has a CMakeLists.txt (apps/, tests/:
-# agents add a folder without editing a shared list). Re-run configure after adding a folder.
+# agents add a folder without editing a shared list), except the EXCLUDE'd ones (added elsewhere). Re-run
+# configure after adding a folder.
 function(rtcd_add_child_directories)
+  cmake_parse_arguments(PARSE_ARGV 0 arg "" "" "EXCLUDE")
   file(GLOB children LIST_DIRECTORIES true RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}" "${CMAKE_CURRENT_SOURCE_DIR}/*")
   list(SORT children)
   foreach(child IN LISTS children)
+    if(child IN_LIST arg_EXCLUDE)
+      continue()
+    endif()
     if(IS_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/${child}" AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${child}/CMakeLists.txt")
       add_subdirectory(${child})
     endif()

@@ -14,7 +14,8 @@
 // Threading: all const member functions are thread-safe.
 //
 // ---------------------------------------------------------------------------------------------------------------
-// Loading rules (implemented in src/geometry, Wave 1 c)
+// Loading rules (library rtcd_robot, src/robot, Wave 1 d; mesh / sphere loading and OBB fitting through the
+// rtcd_geometry functions declared in rtcd/geometry.h)
 // ---------------------------------------------------------------------------------------------------------------
 // URDF -> kinematic chain:
 //   * Joints: revolute and continuous are actuated (continuous limits = [-pi, pi]); fixed joints are folded into
@@ -33,7 +34,7 @@
 //     sin q, giving cosMask[j] = -A K^2 (rotation part only), sinMask[j] = A K (rotation part only),
 //     oneMask[j] = A (I + K^2) with A's translation. All computed in double, then every entry with
 //     |v| < 1e-9 is set to exactly 0 and the rest rounded to float. For panda.urdf the table must equal the
-//     hand-written masks of RTCD/Robot/models/pandas.h bit for bit (Wave 1 c test).
+//     hand-written masks of RTCD/Robot/models/pandas.h bit for bit (Wave 1 d test).
 //   * base = RobotDesc::basePose * (fixed chain from the URDF root to geometry link 0, identity for Panda).
 // Geometry:
 //   * Mesh of a link: the URDF element selected by MeshSource (default visual) must be a <mesh>; the file is
