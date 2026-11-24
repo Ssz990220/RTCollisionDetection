@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -74,8 +75,11 @@ namespace rtcd::internal {
         OptixPipeline pipeline   = nullptr;
         DeviceBuffer raygenRecords, missRecords, hitRecords;
         OptixShaderBindingTable sbt{};
+        // One launch-param block per stream, created on the stream's first launch. A deque, not a vector:
+        // emplace_back never moves existing elements, so the reference paramsFor() returns stays valid while
+        // another thread's first launch on a different stream appends (a vector could reallocate under it).
         std::mutex paramsMutex;
-        std::vector<std::pair<StreamHandle, DeviceBuffer>> params; // one launch-param block per stream
+        std::deque<std::pair<StreamHandle, DeviceBuffer>> params;
 
         DeviceBuffer& paramsFor(StreamHandle s) {
             std::lock_guard<std::mutex> lock(paramsMutex);

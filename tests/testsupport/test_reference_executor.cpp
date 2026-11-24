@@ -2,7 +2,7 @@
 // module (reference_test_program.cu) and a fake Backend. Verifies what the Wave 2 backend agents rely on:
 // raygen selection by LaunchPlan::raygen, params upload, SBT (raygen / miss / hit records), traversal + any-hit,
 // the batch loop of rtcd/backend.h (batch -> stream mapping, staging copy, zeroing, result copy at firstItem,
-// beginCheck), launch == false, and argument checks.
+// beginCheck), launch == false, argument checks, and concurrent first launches on different streams.
 #include <rtcd/internal/reference_executor.h>
 
 #include <rtcd/device_buffer.h>
@@ -19,7 +19,10 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <exception>
+#include <latch>
 #include <memory>
+#include <thread>
 #include <vector>
 
 using namespace rtcd;
@@ -265,6 +268,80 @@ TEST_F(Fixture, ArgumentErrors) {
     std::vector<StreamContext> wrongIndex = streams;
     wrongIndex[1].index                   = 2;
     EXPECT_THROW(ReferenceBatchRunner(ctx, backend, exec, cfg, wrongIndex, kDof), InvalidArgument);
+}
+
+// Concurrent FIRST launches on different streams from different host threads (rtcd/internal/reference_executor.h,
+// "Threading"). Each round uses a fresh executor, so every thread's first launch creates its stream's param block
+// while the others do the same; the threads start together at a latch. Each thread then launches kLaunches times
+// with its own params / buffers; a param block mixed up between streams or lost to a reallocation shows up as
+// wrong counts. A stress test: it cannot prove the absence of a race, but it is what exposes this one.
+TEST_F(Fixture, ConcurrentFirstLaunchesOnDifferentStreams) {
+    constexpr std::uint32_t kThreads  = 8;
+    constexpr std::uint32_t kRounds   = 20;
+    constexpr std::uint32_t kLaunches = 4;
+    constexpr std::uint32_t kItems    = 32;
+    StreamLease many = ctx->acquireStreams(kThreads);
+    ctx->makeCurrent();
+
+    // Per thread: item i's first float = i (other floats noise), hit counters.
+    const auto in = items(kItems, [](std::uint32_t i) { return float(i); });
+    std::vector<DeviceBuffer> inputs, hits;
+    for (std::uint32_t t = 0; t < kThreads; ++t) {
+        inputs.push_back(DeviceBuffer::fromHost(std::span<const float>(in)));
+        hits.emplace_back(std::size_t(kItems) * sizeof(std::uint32_t));
+    }
+    const ProgramSet programs = testPrograms();
+
+    for (std::uint32_t round = 0; round < kRounds; ++round) {
+        ReferenceExecutor exec(ctx, programs, cfg.optix);
+        for (std::uint32_t t = 0; t < kThreads; ++t) {
+            hits[t].memsetAsync(0, hits[t].size(), many[t]);
+        }
+        RTCD_CUDA_CHECK(cudaDeviceSynchronize());
+
+        std::latch start(kThreads);
+        std::vector<std::exception_ptr> errors(kThreads);
+        std::vector<std::thread> threads;
+        for (std::uint32_t t = 0; t < kThreads; ++t) {
+            threads.emplace_back([&, t] {
+                try {
+                    ctx->makeCurrent();
+                    TestParams p{};
+                    p.items         = inputs[t].ptr();
+                    p.hitCounts     = hits[t].ptr();
+                    p.itemCount     = kItems;
+                    p.floatsPerItem = fpi;
+                    p.addValue      = 1000 * (t + 1);
+                    LaunchPlan plan;
+                    plan.width       = kItems;
+                    plan.params      = &p;
+                    plan.paramsBytes = sizeof(p);
+                    plan.raygen      = kRaygenCopy;
+                    start.arrive_and_wait();
+                    for (std::uint32_t k = 0; k < kLaunches; ++k) {
+                        exec.launch(many[t], plan);
+                    }
+                    RTCD_CUDA_CHECK(cudaStreamSynchronize(many[t]));
+                } catch (...) {
+                    errors[t] = std::current_exception();
+                }
+            });
+        }
+        for (auto& th : threads) {
+            th.join();
+        }
+        for (std::uint32_t t = 0; t < kThreads; ++t) {
+            if (errors[t]) {
+                std::rethrow_exception(errors[t]);
+            }
+            std::vector<std::uint32_t> counts(kItems);
+            hits[t].download(counts.data(), counts.size() * sizeof(std::uint32_t));
+            for (std::uint32_t i = 0; i < kItems; ++i) {
+                ASSERT_EQ(counts[i], kLaunches * (i + 1000 * (t + 1))) << "round " << round << " thread " << t
+                                                                        << " item " << i;
+            }
+        }
+    }
 }
 
 TEST_F(Fixture, BadEntryPointThrowsOptixError) {
