@@ -81,7 +81,7 @@ endif()
 if(TARGET rtcd_demo_curve)
   foreach(mode linear quad)
     add_test(NAME rtcd_demo_curve_smoke_${mode}
-      COMMAND rtcd_demo_curve --setup ${PROJECT_SOURCE_DIR}/apps/demo/setups/demo_${mode}.json --counts 1,16,1000,4096
+      COMMAND rtcd_demo_curve --setup ${PROJECT_SOURCE_DIR}/configs/setups/demo_${mode}.json --counts 1,16,1000,4096
               --repeats 1
       WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
     set_tests_properties(rtcd_demo_curve_smoke_${mode} PROPERTIES LABELS new_gpu)

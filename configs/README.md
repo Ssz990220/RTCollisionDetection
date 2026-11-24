@@ -18,4 +18,5 @@ shared, untracked `data/` folder; the regression goldens remain in `data/CCTest/
 | `scenes/shelf_simple.json` | old `Scene/shelfSimple.h` |
 | `robots/panda.json` | Franka Panda: `models/franka_description/panda.urdf`, watertight simplified meshes, sphere files |
 | `setups/regression_{ias,ray,linear,quad}.json` | checker + `scenes/shelf.json` + `robots/panda.json` for each regression mode (`rtcd::loadSetup`) |
+| `setups/demo_{ias,ray,linear,quad}.json` | the demos' setups (`rtcd_demo_discrete` / `rtcd_demo_curve --setup demo_<mode>`): the old demo parameters on `scenes/shelf_dense.json` |
 | `spline_weights/` | B-spline fitting weights `<quad|cubic>/<normal|repeated>/<control>_<trajectory>.txt`, an identical copy of the old `RTCD/data/weights/` (`curve.spline_weights_dir`) |

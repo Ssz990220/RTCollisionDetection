@@ -7,7 +7,7 @@
 //                    [--seed S] [--step F]
 //
 //   --setup     setup JSON (rtcd::loadSetup: checker + scene + robot), or a bare name meaning
-//               apps/demo/setups/<name>.json of the source tree (found by walking up from the working directory,
+//               configs/setups/<name>.json of the source tree (found by walking up from the working directory,
 //               then from the executable's directory). Default demo_ias (discrete) / demo_linear (curve). Any other
 //               setup works too, e.g. configs/setups/regression_quad.json.
 //   --override  rtcd::applyOverrides on the checker config (e.g. "streams=8,max_batch_size=256")
