@@ -1,0 +1,6 @@
+{
+  "name": "debug_box",
+  "obstacles": [
+    { "name": "debug_box", "mesh": "../../models/debugBox.obj", "scale": 1.0 }
+  ]
+}

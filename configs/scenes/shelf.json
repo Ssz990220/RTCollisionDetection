@@ -1,0 +1,13 @@
+{
+  "name": "shelf",
+  "obstacles": [
+    { "name": "shelf", "mesh": "../../models/curobo/shelves.obj", "scale": 1.0, "pose": { "translation": [0.45, 0.0, 0.4] } },
+    { "name": "bin1", "mesh": "../../models/curobo/bin.obj", "pose": { "translation": [0.0, -0.6, 0.0] } },
+    { "name": "bin2", "mesh": "../../models/curobo/bin.obj", "pose": { "translation": [0.0, 0.6, 0.0] } },
+    { "name": "bob", "mesh": "../../models/curobo/Bob.obj", "pose": { "translation": [-0.4, 0.0, 0.0] } },
+    { "name": "cow", "mesh": "../../models/curobo/Cow.obj", "pose": { "translation": [-0.4, 0.0, 0.0] } },
+    { "name": "fish", "mesh": "../../models/curobo/Fish.obj", "pose": { "translation": [-0.4, 0.0, 0.0] } },
+    { "name": "sheep", "mesh": "../../models/curobo/Sheep.obj", "pose": { "translation": [-0.4, 0.0, 0.0] } },
+    { "name": "snakeboard", "mesh": "../../models/curobo/Snakeboard.obj", "pose": { "translation": [-0.4, 0.0, 0.0] } }
+  ]
+}
