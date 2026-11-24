@@ -2,30 +2,12 @@
 
 #include <rtcd/errors.h>
 
-#if RTCD_HAVE_CHECKER
-#include <rtcd/checker.h>
-#endif
-#if RTCD_HAVE_BACKEND_MESH || RTCD_HAVE_BACKEND_RAY || RTCD_HAVE_BACKEND_CURVE
-#define RTCD_REGRESSION_HAVE_REFERENCE 1
 #include <rtcd/backend.h>
+#include <rtcd/checker.h>
 #include <rtcd/internal/reference_executor.h>
-#else
-#define RTCD_REGRESSION_HAVE_REFERENCE 0
-#endif
 
 namespace rtcd::regression {
 
-    bool checkerEngineAvailable() { return RTCD_HAVE_CHECKER != 0; }
-
-    bool referenceEngineAvailable(Mode mode) {
-        switch (mode) {
-        case Mode::Mesh: return RTCD_HAVE_BACKEND_MESH != 0;
-        case Mode::Ray: return RTCD_HAVE_BACKEND_RAY != 0;
-        default: return RTCD_HAVE_BACKEND_CURVE != 0;
-        }
-    }
-
-#if RTCD_HAVE_CHECKER
     namespace {
         class CheckerEngine final : public Engine {
         public:
@@ -48,32 +30,17 @@ namespace rtcd::regression {
         std::shared_ptr<const RobotModel> robot, std::shared_ptr<const Scene> scene) {
         return std::make_unique<CheckerEngine>(std::move(ctx), config, std::move(robot), std::move(scene));
     }
-#else
-    std::unique_ptr<Engine> makeCheckerEngine(
-        std::shared_ptr<Context>, const CheckerConfig&, std::shared_ptr<const RobotModel>, std::shared_ptr<const Scene>) {
-        throw UnsupportedError("engine 'checker' is not available in this build (CollisionChecker / src/detector and "
-                               "the three backends are not all implemented)");
-    }
-#endif
 
-#if RTCD_REGRESSION_HAVE_REFERENCE
     namespace {
         std::unique_ptr<Backend> createBackend(const BackendCreateInfo& info) {
             switch (info.config->mode) {
-#if RTCD_HAVE_BACKEND_MESH
             case Mode::Mesh: return createMeshBackend(info);
-#endif
-#if RTCD_HAVE_BACKEND_RAY
             case Mode::Ray: return createRayBackend(info);
-#endif
-#if RTCD_HAVE_BACKEND_CURVE
             case Mode::LinearCurve:
             case Mode::QuadraticCurve:
             case Mode::CubicCurve: return createCurveBackend(info);
-#endif
-            default: break;
             }
-            throw UnsupportedError("engine 'reference': the backend of this mode is not implemented in this build");
+            throw UnsupportedError("engine 'reference': unknown mode");
         }
 
         // Members in construction order; destruction (reverse) releases runner, executor and backend before the
@@ -116,16 +83,7 @@ namespace rtcd::regression {
 
     std::unique_ptr<Engine> makeReferenceEngine(std::shared_ptr<Context> ctx, const CheckerConfig& config,
         std::shared_ptr<const RobotModel> robot, std::shared_ptr<const Scene> scene) {
-        if (!referenceEngineAvailable(config.mode)) {
-            throw UnsupportedError("engine 'reference': the backend of this mode is not implemented in this build");
-        }
         return std::make_unique<ReferenceEngine>(std::move(ctx), config, std::move(robot), std::move(scene));
     }
-#else
-    std::unique_ptr<Engine> makeReferenceEngine(
-        std::shared_ptr<Context>, const CheckerConfig&, std::shared_ptr<const RobotModel>, std::shared_ptr<const Scene>) {
-        throw UnsupportedError("engine 'reference' is not available in this build (no backend is implemented)");
-    }
-#endif
 
 } // namespace rtcd::regression

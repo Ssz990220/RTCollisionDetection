@@ -5,7 +5,8 @@
 #                       segment compaction (ports of RTCD/Robot/robot.cu and sweptVolume.cu, bit-identical)
 #   curve_programs.cu   OptiX programs (__raygen__oneside, __anyhit__GAS), compiled to OptiX IR and embedded
 # curve_kernels.cu is compiled with the project's default CUDA flags (no fast math, default FMA contraction), like
-# the old rtcd_legacy_kernels, so the curve points stay bit-identical to the old stack.
+# the removed old stack's kernel library, so the curve points stay bit-identical to the old stack (stored
+# reference: tests/data/reference/curve_kernels.txt).
 rtcd_add_optix_ir(rtcd_backend_curve_ir
   SOURCES curve_programs.cu)
 

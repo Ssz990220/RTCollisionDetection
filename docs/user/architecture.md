@@ -1,10 +1,11 @@
 # Architecture in one page (for contributors)
 
-The new stack is plain C++20 libraries plus one compiled OptiX program module per backend. The full contract
+The library is plain C++20 libraries plus one compiled OptiX program module per backend. The full contract
 (every header, the call sequence of a check, what each backend does, open questions) is
 [docs/design/interfaces.md](../design/interfaces.md); the headers under `include/rtcd/` are frozen and changed only
-through the procedure at the top of that document. The old stack under `RTCD/` is a frozen reference: nothing in
-the new tree depends on it except parity tests and the side-by-side timing runner (`apps/side_by_side`).
+through the procedure at the top of that document. The original header-only code under `RTCD/` (the "old stack")
+was removed after this library reached parity with it; its last commit is tag `old-stack-final`, and its outputs
+are kept as stored references under `tests/data/`.
 
 ## Modules
 A library may depend only on libraries above it (`src/CMakeLists.txt` repeats this list).
@@ -71,9 +72,12 @@ The `Backend` contract, in short (full text in `backend.h`):
    end to end with `rtcd_regression --setup <setup.json>`.
 
 ## Tests, apps, data
-- ctest labels: `new_unit` (no GPU), `new_gpu` (GPU, includes the golden regression `rtcd_regression_*` and the
-  example smoke tests), `regression` (the old stack's golden tests). New test folders under `tests/` and new app
-  folders under `apps/` are picked up at configure time.
-- Correctness gate: per-item flags must equal `data/CCTest/golden_{ias,ray,linear,quad}.bin` (4096 items each);
-  hit counts may differ, flags may not. Goldens are never re-recorded.
-- `data/` (goldens, cached poses and KNN trajectories) is shared and untracked; the new stack only reads it.
+- ctest labels: `new_unit` (no GPU), `new_gpu` (GPU, includes the golden regression `rtcd_regression_*`, the
+  stored-reference tests and the app smoke tests), `regression` (only the golden regression entries
+  `rtcd_regression_*`, a subset of `new_gpu`). New test folders under `tests/` and new app folders under `apps/`
+  are picked up at configure time.
+- Correctness gate: per-item flags must equal `tests/data/CCTest/golden_{ias,ray,linear,quad}.bin` (4096 items
+  each); hit counts may differ, flags may not. Goldens are never re-recorded.
+- `tests/data/` (committed): goldens, the cached regression / benchmark inputs and the stored outputs of the old
+  stack (`tests/data/reference`; format and generators in `tests/data/README.md`). The local, untracked `data/`
+  folder only receives benchmark results and plots.

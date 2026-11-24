@@ -1,4 +1,4 @@
-# Tests of rtcd_core (Wave 1 a owns this folder).
+# Tests of rtcd_core.
 #
 # rtcd_core_abi_check: compile-only (OBJECT, part of AllNew, never linked). With the CUDA / OptiX include paths
 # of rtcd_core it static_asserts that the handle aliases / mirrored flag values of the public headers equal the
@@ -34,9 +34,3 @@ rtcd_add_new_test(test_core_accel LABEL new_gpu
 rtcd_add_new_test(test_core_obb_reference LABEL new_gpu
   SOURCES test_core_obb_reference.cpp obb_reference_cases.h
   LIBS rtcd_core rtcd_testsupport)
-
-# Parity with the OLD STACK (links rtcd_legacy_kernels; delete with the old stack): obbOverlapCounts vs
-# RTCD::BBCDRobotMask, bit-identical counts; with RTCD_WRITE_REFERENCE=<dir> it writes obb_overlap.txt.
-rtcd_add_new_test(test_core_legacy_parity LABEL new_gpu
-  SOURCES test_core_legacy_parity.cpp obb_reference_cases.h
-  LIBS rtcd_core rtcd_testsupport rtcd_legacy_kernels)

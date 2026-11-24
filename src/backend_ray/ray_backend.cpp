@@ -1,6 +1,6 @@
 // rtcd_backend_ray: createRayBackend (rtcd/backend.h), Mode::Ray = old LinkType::RAY_ONLINE (RobotToObs).
 //
-// Old-stack reference (frozen, the specification of this file):
+// Old-stack reference (the specification this file was ported from; removed, see tag old-stack-final):
 //   RTCD/Robot/batchRayRobot.h            streamRayRobot / batchRayRobot: ray templates (every link's unique edges
 //                                         in link order), ray -> link map, per-stream link transforms and link
 //                                         OBBs, updateWithMask storing only the mask, launch width cap, skip-hit;

@@ -20,12 +20,12 @@ This package implements mesh-to-mesh and mesh-to-robot-sphere-swept-volume colli
   <em>Ray tracing collision detection methods: discrete-pose collision detection by ray-tracing (a) along obstacle meshes and (b) along robot meshes, and continuous collision detection by ray-tracing against swept sphere-approximated robot volumes (c) piecewise-linear paths or (d) quadratic B-spline paths.</em>
 </p>
 
-> **Two implementations live side by side in this branch.** The library described in this README is the new
-> stack: public headers in `include/rtcd/`, implementation in `src/`, executables in `apps/`, tests in `tests/`,
-> JSON configuration in `configs/`. The original header-only, template-configured code under `RTCD/` (the "old
-> stack") is still present, frozen, as the reference implementation and the timing baseline; it will be removed
-> separately. The new stack reproduces the old stack's collision flags on all four regression references and runs
-> at the same speed (see [Status](#status)).
+> **Layout.** Public headers in `include/rtcd/`, implementation in `src/`, executables in `apps/`, tests and their
+> committed reference data in `tests/`, JSON configuration in `configs/`. This library replaced the original
+> header-only, template-configured code under `RTCD/` (the "old stack"), which has been removed; its last commit is
+> tag `old-stack-final`. Before the removal the new code reproduced the old stack's collision flags on all four
+> regression references and ran at the same speed (see [Status](#status)); the old stack's results are kept as
+> stored references in `tests/data/`.
 
 ## Contents
 - [TODO](#todo)
@@ -45,10 +45,10 @@ This package implements mesh-to-mesh and mesh-to-robot-sphere-swept-volume colli
 - [x] Upload the source code.
 - [x] Robot loaded at runtime from its URDF (no hand-written robot header). See [Set up a new robot](#set-up-a-new-robot).
 - [x] Runtime configuration from JSON (checker, scene, robot) instead of compile-time template parameters.
-- [x] Port to OptiX 9.1 / CUDA 13.2 (new stack tested on an RTX 5080).
-- [ ] Delete the old stack under `RTCD/` (the owner decides when).
-- [ ] Demos on the new stack (the demos under `RTCD/Demo` still use the old stack).
-- [ ] Build and test the new stack on Linux and with compilers other than MSVC.
+- [x] Port to OptiX 9.1 / CUDA 13.2 (tested on an RTX 5080).
+- [x] Delete the old stack under `RTCD/` (last commit: tag `old-stack-final`).
+- [x] Demos on the new stack (`rtcd_demo_discrete`, `rtcd_demo_curve`).
+- [ ] Build and test on Linux and with compilers other than MSVC.
 - [ ] Reference results for cubic B-spline curves.
 - [ ] Spline weight files for `"phantom"` end points.
 - [ ] Merge RobotToObs and ObsToRobot (Two-way method)
@@ -107,7 +107,7 @@ This package implements mesh-to-mesh and mesh-to-robot-sphere-swept-volume colli
 </p>
 
 > The result figures above were measured on an **RTX 4070 under Linux with the original code** (the old stack,
-> before the OptiX 9.1 port and the restructuring). They have not been re-measured with the new stack.
+> before the OptiX 9.1 port and the restructuring). They have not been re-measured with the current code.
 
 ## What the library does
 RTCD checks a batch of robot configurations against a static scene of triangle-mesh obstacles and returns one
@@ -138,18 +138,18 @@ control / trajectory point counts. The relative speed of the modes is shown by t
 4070); measure on your own hardware with the [benchmarks](#benchmarks).
 
 ## Requirements
-Tested (the only configuration the new stack has been built and run on):
+Tested (the only configuration the library has been built and run on):
 - Windows 11, Visual Studio 2026 with MSVC 14.52, Ninja, Release build (CMake >= 3.25 is required);
 - CUDA Toolkit 13.2; OptiX SDK 9.1.0; an RTX 5080 (an RTX GPU is required: OptiX hardware ray tracing);
 - vcpkg (triplet `x64-windows`) with the packages the CMake files look for:
   ```bash
   vcpkg install eigen3 urdfdom urdfdom-headers benchmark nlohmann-json gtest
   ```
-  (`OpenGL` is found from the system. Earlier instructions also listed `lz4 tbb flann imgui glfw3`; no CMake file
-  in this branch looks for them.) `tiny_obj_loader.h` is downloaded at configure time, pinned to a fixed commit
-  and hash (`cmake/configure_tiny_obj_loader.cmake`).
+  (Earlier instructions also listed `lz4 tbb flann imgui glfw3` and OpenGL; no CMake file looks for them any
+  more.) `tiny_obj_loader.h` is downloaded at configure time, pinned to a fixed commit and hash
+  (`cmake/configure_tiny_obj_loader.cmake`).
 
-Not tested: Linux (the CMake files still have Linux branches, but the new stack has never been built there), other
+Not tested: Linux (the CMake files still have Linux branches, but the library has never been built there), other
 compilers, Debug builds, other GPUs, other CUDA / OptiX versions (CMake accepts CUDA >= 12.6).
 
 OptiX is found through `OptiX_INSTALL_DIR` (CMake variable or environment variable) or the environment variable
@@ -164,7 +164,7 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTS=ON ^
       -DCMAKE_CUDA_FLAGS=-D_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH
 cmake --build build --target AllNew
 ```
-This is the configure line the new stack is built with. `_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH` is needed
+This is the configure line the library is built with. `_ALLOW_COMPILER_AND_STL_VERSION_MISMATCH` is needed
 because MSVC 14.52's standard library rejects the CUDA 13.2 compiler otherwise (error STL1002; the project's own
 CUDA targets also get it from `cmake/configCompilerFlags.cmake`).
 
@@ -173,27 +173,28 @@ CMake options and targets:
 | | |
 |---|---|
 | `-DBUILD_TESTS=ON` | configure the tests (default `OFF`); needed for `ctest` |
-| `AllNew` | every target of the new stack: libraries, apps, tests (with `BUILD_TESTS=ON`), compile-only header checks |
+| `AllNew` | every target: libraries, apps, tests (with `BUILD_TESTS=ON`), compile-only header checks |
 | `rtcd` | the library to link (an INTERFACE target over the detector, the three backends, config and JSON modules) |
 | `rtcd_example` | the [minimal example](#usage) |
-| `rtcd_regression` | the new stack's golden regression, driven by a setup file |
-| `rtcd_bench_discrete`, `rtcd_bench_curve` | the new stack's Google Benchmark apps |
-| `AllRegressionTests` | the old stack's four golden tests (only with `BUILD_TESTS=ON`; not part of `AllNew`) |
-| `AllBenchmarks`, `AllDemos` | old-stack benchmarks and demos |
+| `rtcd_regression` | the golden regression, driven by a setup file |
+| `rtcd_bench_discrete`, `rtcd_bench_curve` | the Google Benchmark apps |
+| `rtcd_demo_discrete`, `rtcd_demo_curve` | the demos (random poses / trajectories on the dense shelf, `configs/setups/demo_<mode>.json`) |
 
-New-stack executables go to `build/bin/apps`, new-stack tests to `build/bin/Tests/new`.
+Executables go to `build/bin/apps`, tests to `build/bin/Tests/new`.
 
-Tests, from `build/` (new-stack tests run with the repository root as working directory):
+Tests, from `build/` (tests run with the repository root as working directory):
 ```bash
-ctest -L new_unit     # new stack, no GPU needed
-ctest -L new_gpu      # new stack on the GPU, including the golden regression and the example smoke tests
-ctest -L regression   # the old stack's four golden tests (build AllRegressionTests first)
+ctest -L new_unit     # no GPU needed
+ctest -L new_gpu      # on the GPU, including the golden regression, the stored references and the app smoke tests
+ctest -L regression   # only the golden regression: rtcd_regression_<ias|ray|linear|quad> (+ ray hit modes, quad
+                      # with geometry flags none); a subset of new_gpu
 ```
-The golden, parity and benchmark-input tests need the shared `data/` folder, which is **not part of the
-repository** (`.gitignore`): the regression
-goldens `data/CCTest/golden_{ias,ray,linear,quad}.bin` and the cached poses / KNN trajectories under
-`data/motions`. The new stack only reads them; the old stack's regression and benchmark executables generate the
-`data/motions` caches when they are missing. The example (`rtcd_example`) needs nothing from `data/`.
+Everything the tests read is in the repository: the regression goldens
+`tests/data/CCTest/golden_{ias,ray,linear,quad}.bin`, the cached poses / KNN trajectories under
+`tests/data/motions`, and the stored outputs of the removed old stack under `tests/data/reference`
+([tests/data/README.md](tests/data/README.md): what each file is, how it was produced, and why goldens and references
+are never regenerated casually). `RTCD_DATA_DIR` (or `--data <dir>` for the apps) points at another folder with the
+same layout. The local, gitignored `data/` folder only receives benchmark results and plots.
 
 ## Usage
 ### Minimal example
@@ -311,9 +312,9 @@ variable `RTCD_OVERRIDES` (read by the regression and benchmark apps, never by t
 `rtcd::dumpCheckerConfig(checker.config())` returns the resolved configuration, every field, as JSON text.
 
 ### Golden regression
-`rtcd_regression --setup configs/setups/regression_<ias|ray|linear|quad>.json` runs the new stack on the cached
+`rtcd_regression --setup configs/setups/regression_<ias|ray|linear|quad>.json` runs the checker on the cached
 regression inputs and checks determinism, prefix consistency (the first N items alone give the same flags) and the
-flags against `data/CCTest/golden_<mode>.bin` (exit code 0 = all passed). Options: `--engine auto|checker|reference`,
+flags against `tests/data/CCTest/golden_<mode>.bin` (exit code 0 = all passed; `ctest -L regression` runs it). Options: `--engine auto|checker|reference`,
 `--override "k=v,..."`, `--golden <file>` / `--no-golden`, `--items N`, `--data <dir>`, `--dump-flags <file>`.
 
 ## Set up a new robot
@@ -363,7 +364,7 @@ that has geometry, including links merged by fixed joints:
   meters, `r > 0`); empty lines and lines starting with `#` are skipped; any other line is an `IoError` with its
   line number. An empty file gives the link zero spheres. Spheres of merged links are transformed into the parent
   link frame.
-- This branch contains no sphere-generation tool for the new stack; write the files with any tool you like.
+- Write the files with any tool you like (one sphere per line, as above).
 
 Check a new robot without a GPU: `rtcd::RobotModel::load(rtcd::loadRobotDesc("my_robot.json"))` throws a precise
 error for each rule above and reports DOF, joint names, limits and per-link geometry. Then reference the robot file
@@ -410,10 +411,10 @@ goldens) and `shelf_dense.json`.
 </p>
 
 ### RTCD Benchmarks
-The new stack's Google Benchmark apps are `rtcd_bench_discrete` (poses, `mesh` and `ray`) and `rtcd_bench_curve`
+The Google Benchmark apps are `rtcd_bench_discrete` (poses, `mesh` and `ray`) and `rtcd_bench_curve`
 (trajectories), built by `AllNew` into `build/bin/apps`. They time `CollisionChecker::checkDevice` on poses or KNN
-trajectories sampled from the cached inputs under `data/motions`. The scene is a runtime option, so one executable
-serves all three scenes:
+trajectories sampled from the cached inputs under `tests/data/motions` (8192 poses and their 4 nearest neighbours,
+committed). The scene is a runtime option, so one executable serves all three scenes:
 ```bash
 build/bin/apps/rtcd_bench_discrete --scene configs/scenes/shelf_dense.json --benchmark_out=<file>.json
 ```
@@ -421,16 +422,22 @@ App options: `--scene <scene.json>` (default `configs/scenes/shelf.json`), `--ro
 `configs/robots/panda.json`), `--data <dir>`; every other argument goes to Google Benchmark. The environment
 variable `RTCD_OVERRIDES` changes the checker configs they build.
 
-The scripts `benchmark.sh` (Linux) and `benchmark.bat` (Windows) in the repository root run the whole suite over
-the three scenes and write the JSON results under `data/Benchmark/result/`, where the plotting scripts read them;
-read the scripts for which executables they run (the old-stack benchmark executables, target `AllBenchmarks`,
-remain available while the old stack exists).
-
-**The new apps only read the cached inputs.** On a fresh `data/` folder, run the old-stack benchmarks (or the
-old regression) once first: they generate the cached poses and KNN trajectories that both stacks and the cuRobo
-benchmark use.
-
-This will take quite amount of time to run all benchmarks.
+The scripts in the repository root run both apps over the three scenes and write the Google Benchmark JSON where
+the plotting scripts read it: `data/Benchmark/result/discrete/{denseShelf,shelf,shelfSimple}.json` and
+`data/Benchmark/result/curve/{cur_denseShelf,cur_shelf,cur_shelfSimple}.json` (`data/` is the local, gitignored
+output folder):
+```bash
+./benchmark.sh  [--only discrete|curve] [--build <dir>] [--out <dir>] [-- <Google Benchmark args>]   # Linux
+```
+```bat
+.\benchmark.bat [--only discrete|curve] [--build <dir>] [--out <dir>] [--no-pause] ["<GB arg>" ...]
+```
+On Windows invoke the batch file with a path (`.\benchmark.bat`): PowerShell does not run a script from the
+current directory by its bare name. `--build` defaults to `./build` (executables in `<build>/bin/apps`, or
+`<build>/bin/apps/Release` for the Visual Studio generator), `--out` to `./data/Benchmark/result`; quote Google
+Benchmark arguments that contain `=` for `cmd` (`"--benchmark_filter=BM_IAS"`). The benchmark names and argument
+ranges are those of the old stack's executables, so results stay comparable with earlier ones. Running the whole
+suite takes a while (a few minutes per executable and scene).
 
 ### Curobo Benchmarks
 We modified the curobo library to disable self-collision and other constraints in order for a fair comparison. To run the curobo benchmark, first install a customized version of curobo [here](https://github.com/Ssz990220/curobo).
@@ -457,16 +464,19 @@ julia -O3 ./scripts/Benchmark/plots/discrete/resultAnalysis.jl # For discrete po
 julia -O3 ./scripts/Benchmark/plots/curve/resultAnalysisEff.jl # For continuous benchmark results
 ```
 
-The plots will be in `./data/Plots/`.
+The plots will be in `./data/Benchmark/Plots/{discrete,curve}/`.
 
 ## Status
 Measured on Windows, RTX 5080, Release build:
-- **Correctness.** Through the public `CollisionChecker`, the new stack reproduces all four goldens with zero
-  differing flags: mesh 1365, ray 1383, linear curves 2895, quadratic curves 2847 colliding items of 4096 (Panda,
-  medium shelf). Ray mode matches in all four ray hit modes, quadratic curves with both curve geometry flags, and
-  the curve modes also with OBB culling on.
-- **Speed.** Old and new stack timed in the same process (side-by-side runner, medium shelf): median time
-  new / old = 0.97-1.01 (mesh), 0.87-0.97 (ray), 0.98-1.08 (linear curves), 0.98-1.04 (quadratic curves).
+- **Correctness.** Through the public `CollisionChecker`, the library reproduces all four goldens (recorded with
+  the old stack) with zero differing flags: mesh 1365, ray 1383, linear curves 2895, quadratic curves 2847
+  colliding items of 4096 (Panda, medium shelf). Ray mode matches in all four ray hit modes, quadratic curves with
+  both curve geometry flags, and the curve modes also with OBB culling on. Below the flags, the stored outputs of
+  the old stack (kinematics table, FK and curve kernels, meshes, scene edge rays, OBB overlap counts, IAS hit counts,
+  refit behaviour; `tests/data/reference`) are reproduced bit for bit.
+- **Speed.** Before the old stack was removed, old and new were timed in the same process (side-by-side runner,
+  medium shelf): median time new / old = 0.97-1.01 (mesh), 0.87-0.97 (ray), 0.98-1.08 (linear curves), 0.98-1.04
+  (quadratic curves).
 
 ## Known limitations and findings
 - **Cubic curves have no reference results.** `cubic_curve` is implemented and its results are deterministic, but
@@ -475,10 +485,10 @@ Measured on Windows, RTX 5080, Release build:
   against trace cost; a refitted GAS can flip grazing hits. With `{"every": 3}` the quadratic regression reports
   two extra collisions (items 4065 and 3528 at N = 4096), in the old and the new stack alike; no flip was seen under
   `"auto"`, `"always"` or `"never"` in 324 compared checks. The goldens use `"auto"` (the default).
-- **The old stack's quadratic OBB culling was wrong; it is fixed in the new stack.** The old quadratic segment OBB
-  construction could produce boxes that do not contain their curve segment, so OBB culling dropped hits (it was
-  never covered by a golden: the curve goldens run with culling off). The new stack's boxes contain their segments,
-  and OBB culling on reproduces the culling-off flags for linear and quadratic curves.
+- **The old stack's quadratic OBB culling was wrong; it is fixed here.** The old quadratic segment OBB construction
+  could produce boxes that do not contain their curve segment, so OBB culling dropped hits (it was never covered by
+  a golden: the curve goldens run with culling off). The current boxes contain their segments, and OBB culling on
+  reproduces the culling-off flags for linear and quadratic curves.
 - **Small batches are bound by host-side driver overhead on Windows.** Each CUDA / OptiX host call costs on the
   order of 5-30 us in the driver on this machine, so at small batch sizes the time per check is dominated by the
   number of host calls, not by GPU work.
@@ -490,9 +500,9 @@ Measured on Windows, RTX 5080, Release build:
 - No self-collision checking; obstacles are static.
 
 ## Disclaimers
-The code contained herein is of "research grade". The new stack under `include/rtcd/` and `src/` is documented and
+The code contained herein is of "research grade". The library under `include/rtcd/` and `src/` is documented and
 tested against the original results, but it has been built and run on one machine and one robot only (see
-[Requirements](#requirements)); the old stack under `RTCD/` is kept for reference and is largely uncommented.
+[Requirements](#requirements)). The original code (`RTCD/`, removed) is available at tag `old-stack-final`.
 
 Further development is ongoing. For upcoming features and demos, please refer to the TODO list.
 

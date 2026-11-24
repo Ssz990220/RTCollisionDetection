@@ -13,8 +13,8 @@
 // concatFloatsAsInts(weight) ("1111111" for the unit weights of the regression and the benchmarks).
 //
 // The old harness generated a missing cache (Halton samples within the pandas.h bounds, GPU KNN). This module only
-// reads: a missing or malformed cache file throws rtcd::IoError (design doc Q7: inputs stay identical; regenerate
-// with the old stack if ever needed). The flat output layout is the new stack's item layout (rtcd/types.h):
+// reads: a missing or malformed cache file throws rtcd::IoError (design doc Q7: inputs stay identical; the only
+// generator is the removed old stack, tag old-stack-final). The flat output layout is the item layout (rtcd/types.h):
 // [item][waypoint][joint], packed.
 
 #include <cstddef>

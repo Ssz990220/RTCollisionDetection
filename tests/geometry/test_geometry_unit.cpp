@@ -1,4 +1,4 @@
-// Unit tests of rtcd_geometry that do not need the old stack: sphere-file rules, edge construction on small
+// Unit tests of rtcd_geometry without stored references: sphere-file rules, edge construction on small
 // hand-made meshes, loader errors, OBB basics. Label new_unit (no GPU).
 
 #include <rtcd/errors.h>

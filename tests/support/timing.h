@@ -1,6 +1,6 @@
 #pragma once
-// support/timing.h -- summary statistics of wall-clock samples (microseconds) for the benchmark apps and the
-// side-by-side runner. Pure host code. (Agents never report timings themselves: main runs these apps.)
+// support/timing.h -- summary statistics of wall-clock samples (microseconds) for the benchmark apps. Pure host
+// code. (Agents never report timings themselves: main runs these apps.)
 
 #include <chrono>
 #include <cstddef>

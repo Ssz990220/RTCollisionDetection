@@ -1,5 +1,5 @@
-// rtcd_regression: the new stack's collision-result regression, the checks of
-// RTCD/CollisionDetector/Test/ccRegression.cpp driven by a setup JSON instead of REG_* compile definitions.
+// rtcd_regression: the collision-result regression (the checks of the old stack's ccRegression.cpp, which recorded
+// the goldens), driven by a setup JSON.
 //
 //   rtcd_regression --setup configs/setups/regression_quad.json
 //                   [--engine auto|checker|reference] [--override "path=value,..."] [--golden <file> | --no-golden]
@@ -11,10 +11,11 @@
 //      1000, items - 1 (B = max_batch_size, S = streams);
 //   3. golden diff: flags == tests/data/CCTest/golden_<ias|ray|linear|quad>.bin (by mode; --golden overrides,
 //      --no-golden skips; cubic curves have no golden). Goldens are never written.
-// Inputs: support/inputs.h regressionInputs (byte-identical to the old harness): poses for the discrete modes,
+// Inputs: support/inputs.h regressionInputs (byte-identical to the old harness that recorded the goldens): poses for
+// the discrete modes,
 // KNN trajectories with curve.trajectory_points waypoints for the curve modes.
-// Engines: "checker" = CollisionChecker::check (needs the Wave 2 detector), "reference" = ReferenceBatchRunner +
-// create<Mode>Backend (needs only that backend); "auto" = checker if linked, else reference.
+// Engines: "checker" = CollisionChecker::check, "reference" = ReferenceBatchRunner + create<Mode>Backend (the
+// backend without the detector core; cross-checks the core); "auto" = checker.
 // Overrides: --override, then env RTCD_OVERRIDES (rtcd::applyOverrides syntax); the old env knobs RTCD_OPTIX_CFG,
 // RTCD_CURVE_GEOM_FLAG, RTCD_BM_REFIT_EVERY are applied before them (support/options.h), so e.g.
 // "--override curve.geometry_flags=none" replaces the old --curve-geom-flag none.
@@ -95,12 +96,7 @@ int main(int argc, char** argv) {
         const std::string mode       = support::modeName(resolved.mode);
         const std::string tag        = "[" + mode + "] ";
 
-        bool useChecker = engineSel == "checker" || (engineSel == "auto" && regression::checkerEngineAvailable());
-        if (engineSel == "auto" && !useChecker && !regression::referenceEngineAvailable(resolved.mode)) {
-            std::cerr << "rtcd_regression: neither the CollisionChecker nor the " << mode
-                      << " backend is implemented in this build; nothing can run yet\n";
-            return 2;
-        }
+        const bool useChecker = engineSel != "reference";
 
         auto ctx   = Context::create(ctxOpt);
         auto robot = RobotModel::load(setup.robot, ctx->logger());

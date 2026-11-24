@@ -79,7 +79,8 @@ namespace rtcd::support {
         std::unordered_map<std::string, std::vector<std::string>> map_;
     };
 
-    // Writes a reference file. Only the generators (old-stack parity tests, run with RTCD_WRITE_REFERENCE) use it.
+    // Writes a reference file. Only the generators used it (the old-stack parity tests, run with RTCD_WRITE_REFERENCE;
+    // removed with the old stack). Kept for writing new references by an explicit owner decision.
     class ReferenceWriter {
     public:
         ReferenceWriter(std::filesystem::path file, std::string_view headerComment);

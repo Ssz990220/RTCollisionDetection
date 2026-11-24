@@ -1,18 +1,10 @@
-# Tests of rtcd_testsupport (Wave 1 e owns this folder).
+# Tests of rtcd_testsupport.
 
-# Host-only utilities: paths, inputs, goldens, legacy options, timing (no GPU).
+# Host-only utilities: paths, inputs (vs the stored old-harness hashes), goldens, reference files, legacy options,
+# timing (no GPU).
 rtcd_add_new_test(test_testsupport_unit LABEL new_unit
   SOURCES test_testsupport_unit.cpp
   LIBS rtcd_testsupport)
-
-# Parity with the old harness: the inputs of support/inputs.h are byte-identical to what
-# RTCD/Utils/Test/poseUtils.h (randomMotions, genCSpaceKNNTraj) produces from the same cache files, and goldens
-# decode identically. Includes old-stack headers and links the old stack (deleted with the old stack). Reads the
-# cache only (asserts the files exist first, so the old code never regenerates / writes them). No GPU work.
-rtcd_add_new_test(test_testsupport_vs_old LABEL new_unit
-  SOURCES test_testsupport_vs_old.cpp
-  LIBS rtcd_testsupport)
-rtcd_use_old_stack(test_testsupport_vs_old)
 
 # ReferenceExecutor / ReferenceBatchRunner on the GPU with a trivial program module of its own (no backend, no
 # Scene): raygen selection, params upload, SBT, any-hit through a single-triangle-pair GAS built in the test,

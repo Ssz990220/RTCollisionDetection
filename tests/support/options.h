@@ -1,9 +1,8 @@
 #pragma once
-// support/options.h -- environment / command-line knobs shared by the apps (regression, benchmarks, side-by-side
-// runner). The library never reads the environment (design doc 3.12); the apps do, through these helpers.
+// support/options.h -- environment / command-line knobs shared by the apps (regression, benchmarks). The library
+// never reads the environment (design doc 3.12); the apps do, through these helpers.
 //
-// Legacy environment variables of the old benchmarks are accepted unchanged, so one shell setting drives the old
-// and the new stack identically in the side-by-side runner:
+// Legacy environment variables of the old stack's benchmarks (removed; tag old-stack-final) are accepted unchanged:
 //   RTCD_OPTIX_CFG="key=value,..."   old OptixCompileConfig::setFields keys: opt, debug, maxreg, exceptions,
 //                                    tracedepth, rayhit, pipelinelog (-> CheckerConfig), validation, loglevel
 //                                    (-> ContextOptions)

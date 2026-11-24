@@ -1,9 +1,10 @@
-# Tests of the new stack (only configured with BUILD_TESTS=ON; the agent build helper always sets it).
+# Tests (only configured with BUILD_TESTS=ON; the agent build helper always sets it).
 #
 # ctest label convention:
 #   new_unit    new stack, no GPU needed (parsing, validation, host-side logic)
 #   new_gpu     new stack, needs a GPU (kernels, OptiX pipelines, collision flags vs. the goldens)
-#   regression  the old stack's four golden tests (RTCD/CollisionDetector/CMakeLists.txt; unchanged)
+#   regression  the golden regression entries rtcd_regression_* (tests/apps, tests/backend_ray; also new_gpu), the
+#               meaning the label had for the removed old stack's ccRegression_<mode> tests
 # Run with `ctest -L <label>` (agents: agent_test.ps1 -Label <label>).
 #
 # One folder per library or topic (tests/core, tests/config, tests/json, tests/geometry, tests/scene,

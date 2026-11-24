@@ -7,7 +7,8 @@ add_library(rtcd_robot STATIC
   kinematics.cu
 )
 # kinematics.cu must keep the old stack's CUDA flags (no -use_fast_math, default FMA contraction, no RDC): the
-# kernels are required to be bit-identical to RTCD/Robot/robot.cu (rtcd_legacy_kernels uses the project defaults).
+# kernels are required to be bit-identical to the removed RTCD/Robot/robot.cu, which was built with the project
+# defaults (stored reference: tests/data/reference/kinematics_fk.txt).
 target_include_directories(rtcd_robot
   PUBLIC  ${PROJECT_SOURCE_DIR}/include
   PRIVATE ${PROJECT_SOURCE_DIR}/src)
