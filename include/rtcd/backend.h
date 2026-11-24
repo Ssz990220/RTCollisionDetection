@@ -192,8 +192,26 @@ namespace rtcd {
     //   * throws rtcd::Error on failure; the core then drains all streams and rethrows on the calling thread.
     //
     // synchronizesHost(itemCount): exact, host-only predicate: true iff prepare() of a batch with that item
-    //   count blocks the host. The core uses it for statistics and (later) to decide whether a batch can be
-    //   captured into a CUDA graph.
+    //   count blocks the host. The core uses it for statistics and, with prepareCapturable(), to decide whether a
+    //   batch can be captured into a CUDA graph.
+    //
+    // prepareCapturable(itemCount) (added 2026-11-24, CheckerConfig::graphPrepare): exact, host-only predicate:
+    //   true iff prepare() for a batch of that item count
+    //     (a) enqueues only plain CUDA work on its stream: kernels, memset / memcpy (no OptiX API call of any
+    //         kind, no host synchronization, no device allocation), and
+    //     (b) returns a LaunchPlan and params that depend only on (stream index, itemCount),
+    //   so that replaying the captured work (stream capture -> CUDA graph) is equivalent to calling prepare() again
+    //   on new contents of the same buffers. true implies !synchronizesHost(itemCount) (the core checks it).
+    //   With CheckerConfig::graphPrepare the core then captures "zero hits, staging copy, prepare()" once per
+    //   (stream, itemCount) and replays it with one cudaGraphLaunch per batch instead of calling prepare().
+    //   HARD RULE: no OptiX call inside a stream capture. Measured on OptiX 9.1 / driver 610.88
+    //   (tests/experiments/graph_capture): optixLaunch and optixAccelBuild inside a capture are silently dropped
+    //   from the graph (only a 64-byte param memcpy, resp. nothing or part of the build, is recorded; the replay
+    //   traces nothing; a partially captured quadratic-curve build crashes with an illegal address), or fail with
+    //   OPTIX_ERROR_CUDA_ERROR (cuEventQuery not permitted while capturing), and in every case they leave the
+    //   OptiX device context with an invalid internal event (later launches fail with OPTIX_ERROR_INVALID_VALUE,
+    //   context destruction fails). A backend whose prepare() builds or refits an acceleration structure must
+    //   return false. Default: false.
     class Backend {
     public:
         virtual ~Backend() = default;
@@ -202,6 +220,10 @@ namespace rtcd {
         virtual void beginCheck(const CheckInfo& info)                              = 0;
         virtual LaunchPlan prepare(const StreamContext& stream, const BatchView& batch) = 0;
         virtual bool synchronizesHost(std::uint32_t itemCount) const noexcept      = 0;
+        virtual bool prepareCapturable(std::uint32_t itemCount) const noexcept {
+            (void) itemCount;
+            return false;
+        }
     };
 
     // Factories, one per backend library (Wave 2 f, g, h). The detector core calls the one matching

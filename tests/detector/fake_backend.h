@@ -56,6 +56,7 @@ namespace rtcd_detector_test {
         std::uint32_t throwAtBatch      = ~0u;   // prepare() throws InvalidArgument for this batch
         bool throwInBeginCheck          = false; // beginCheck() throws UnsupportedError
         std::uint32_t syncThreshold     = ~0u;   // synchronizesHost(n) = n >= syncThreshold (and prepare syncs)
+        std::uint32_t capturableThreshold = ~0u; // prepareCapturable(n) = n >= capturableThreshold
         std::uint32_t badRaygen         = ~0u;   // batch whose plan has raygen = 99 (invalid plan)
         long long spinCycles            = 0;     // for kRaygenSpin
         rtcd::TraversableHandle traversable = 0;
@@ -146,6 +147,9 @@ namespace rtcd_detector_test {
         }
         bool synchronizesHost(std::uint32_t itemCount) const noexcept override {
             return itemCount >= opts_.syncThreshold;
+        }
+        bool prepareCapturable(std::uint32_t itemCount) const noexcept override {
+            return itemCount >= opts_.capturableThreshold;
         }
 
         std::vector<rtcd::StreamContext> streams;

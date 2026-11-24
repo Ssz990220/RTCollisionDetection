@@ -59,6 +59,13 @@ namespace rtcd {
             void beginCheck(const CheckInfo&) override {} // no per-check policy in RAY mode
             LaunchPlan prepare(const StreamContext& stream, const BatchView& batch) override;
             bool synchronizesHost(std::uint32_t) const noexcept override { return false; }
+            // prepare() = linkPoses (+ transformObbs + obbOverlapCounts with OBB culling): kernels only, no OptiX
+            // call (the scene AS is static), no sync; params / plan depend only on (stream, itemCount) for the
+            // core's stable hit-count buffer. The hit mode changes only the programs, OBB culling off only drops
+            // two kernels: capturable for every accepted item count.
+            bool prepareCapturable(std::uint32_t itemCount) const noexcept override {
+                return itemCount >= 1 && itemCount <= maxBatchSize_;
+            }
 
         private:
             struct PerStream {

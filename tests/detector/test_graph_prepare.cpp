@@ -1,11 +1,13 @@
-// GPU test of the graph-prepare experiment of DetectorCore (Track G0; env RTCD_GRAPH_PREPARE=1 at checker
-// construction, off by default): with the real ray backend, a checker that replays the batch's CUDA part
+// GPU test of CheckerConfig::graphPrepare (default on) with the real backends: Backend::prepareCapturable of each
+// backend (ray: true, mesh / curves: false, capturable implies not synchronizing), and with the ray backend a
+// checker that replays the batch's CUDA part
 // (zero hits, staging copy, prepare()) as CUDA graphs must give the same collision flags as a checker without it,
 // and the goldens, for every item count (partial batches -> several cached graphs per stream, eviction), for host
 // and device items, and for device items at changing addresses (the staging-copy node is re-pointed).
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
+#include <rtcd/backend.h>
 #include <rtcd/checker.h>
 #include <rtcd/context.h>
 #include <rtcd/device_buffer.h>
@@ -28,14 +30,6 @@
 using namespace rtcd;
 
 namespace {
-
-    void setGraphPrepareEnv(bool on) {
-#ifdef _WIN32
-        _putenv_s("RTCD_GRAPH_PREPARE", on ? "1" : "0");
-#else
-        setenv("RTCD_GRAPH_PREPARE", on ? "1" : "0", 1);
-#endif
-    }
 
     struct Env {
         std::shared_ptr<Context> ctx;
@@ -64,10 +58,8 @@ namespace {
         CheckerConfig c = env().setup.checker;
         c.numStreams    = streams;
         c.hostDispatch  = dispatch;
-        setGraphPrepareEnv(graph);
-        auto checker = std::make_unique<CollisionChecker>(env().ctx, c, env().robot, env().scene);
-        setGraphPrepareEnv(false);
-        return checker;
+        c.graphPrepare  = graph;
+        return std::make_unique<CollisionChecker>(env().ctx, c, env().robot, env().scene);
     }
 
 } // namespace
@@ -121,29 +113,45 @@ TEST(GraphPrepare, RayFlagsEqualDirectAndGolden) {
     }
 }
 
-// The switch really reaches the core (the facade gives no other way to observe it): the checker logs at Info.
-TEST(GraphPrepare, EnabledOnlyForRayAndOnlyWithTheSwitch) {
-    std::vector<std::string> messages;
-    ContextOptions o = ContextOptions::buildDefault();
-    o.logger.level   = LogLevel::Debug;
-    o.logger.sink    = [&](LogLevel, std::string_view m) { messages.emplace_back(m); };
-    auto ctx         = Context::create(o);
-    auto scene       = std::make_shared<const Scene>(ctx, env().setup.scene);
-    auto count       = [&](const char* text) {
-        std::size_t k = 0;
-        for (const auto& m : messages) k += m.find(text) != std::string::npos;
-        return k;
+// Backend::prepareCapturable per backend and configuration; it must imply !synchronizesHost.
+TEST(GraphPrepare, PrepareCapturablePerBackend) {
+    struct Case {
+        const char* setup;
+        std::string overrides;
+        bool expectCapturable;
     };
-    CheckerConfig c = env().setup.checker;
-    c.verbosity     = LogLevel::Info;
-    { CollisionChecker off(ctx, c, env().robot, scene); }
-    EXPECT_EQ(count("RTCD_GRAPH_PREPARE"), 0u);
-    setGraphPrepareEnv(true);
-    { CollisionChecker on(ctx, c, env().robot, scene); }
-    CheckerConfig mesh = loadSetup(support::configsDir() / "setups" / "regression_ias.json").checker;
-    mesh.verbosity     = LogLevel::Info;
-    { CollisionChecker m(ctx, mesh, env().robot, scene); }
-    setGraphPrepareEnv(false);
-    EXPECT_EQ(count("replayed as CUDA graphs"), 1u);
-    EXPECT_EQ(count("ignored (only the ray backend"), 1u);
+    const std::vector<Case> cases{
+        {"regression_ray.json", "", true},
+        {"regression_ray.json", "obb_culling=false", true},
+        {"regression_ray.json", "ray.hit_mode=first_hit_miss", true},
+        {"regression_ray.json", "ray.hit_mode=traverse", true},
+        {"regression_ias.json", "", false},
+        {"regression_ias.json", "obb_culling=false", false},
+        {"regression_linear.json", "", false},
+        {"regression_quad.json", "", false},
+    };
+    for (const Case& k : cases) {
+        CheckerConfig c = loadSetup(support::configsDir() / "setups" / k.setup).checker;
+        if (!k.overrides.empty()) {
+            applyOverrides(c, k.overrides);
+        }
+        c.numStreams          = 1;
+        const CheckerConfig r = c.resolved();
+        StreamLease lease     = env().ctx->acquireStreams(1);
+        const std::vector<StreamContext> streams{StreamContext{0, lease[0]}};
+        BackendCreateInfo info{env().ctx, &r, env().robot, env().scene, streams};
+        std::unique_ptr<Backend> b = r.mode == Mode::Ray    ? createRayBackend(info)
+                                   : r.mode == Mode::Mesh ? createMeshBackend(info)
+                                                          : createCurveBackend(info);
+        for (std::uint32_t n : {1u, 2u, r.maxBatchSize / 2, r.maxBatchSize}) {
+            EXPECT_EQ(b->prepareCapturable(n), k.expectCapturable) << k.setup << " " << k.overrides << " n " << n;
+            if (b->prepareCapturable(n)) {
+                EXPECT_FALSE(b->synchronizesHost(n)) << k.setup << " n " << n;
+            }
+        }
+        if (r.mode == Mode::Ray) {
+            EXPECT_FALSE(b->prepareCapturable(0));
+            EXPECT_FALSE(b->prepareCapturable(r.maxBatchSize + 1));
+        }
+    }
 }

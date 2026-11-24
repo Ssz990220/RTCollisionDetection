@@ -11,7 +11,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <cstring>
 #include <random>
 #include <string>
@@ -87,16 +86,6 @@ namespace rtcd::detail {
             workers_ = std::make_unique<StreamWorkers>(cfg_.numStreams);
         }
 
-        // Graph-prepare experiment (Track G0; off by default, no contract change: an environment switch). Prototype
-        // gate: only the ray backend's prepare() is known to issue plain CUDA work only (no OptiX call, no host
-        // sync); optixAccelBuild / optixLaunch cannot be captured on OptiX 9.1 (tests/experiments/graph_capture).
-        // A real implementation needs a Backend capability query instead of this mode test.
-        if (const char* env = std::getenv("RTCD_GRAPH_PREPARE"); env != nullptr && std::string(env) == "1") {
-            graphPrepare_ = backend_->mode() == Mode::Ray;
-            log_.log(LogLevel::Info, std::string("CollisionChecker: RTCD_GRAPH_PREPARE=1: ")
-                                         + (graphPrepare_ ? "batch CUDA part replayed as CUDA graphs"
-                                                          : "ignored (only the ray backend's prepare() is capturable)"));
-        }
     }
 
     DetectorCore::~DetectorCore() {
@@ -328,8 +317,12 @@ namespace rtcd::detail {
         view.hitCounts  = DeviceSpan<std::uint32_t>{st.hits.ptr(), n};
 
         LaunchPlan plan;
-        if (graphPrepare_ && source.strideBytes == fpiBytes && !backend_->synchronizesHost(n)) {
-            // 7.1 - 7.3 as one cudaGraphLaunch (experiment, see graphPrepareEnabled()).
+        if (cfg_.graphPrepare && source.strideBytes == fpiBytes && backend_->prepareCapturable(n)) {
+            // 7.1 - 7.3 as one cudaGraphLaunch (CheckerConfig::graphPrepare, Backend::prepareCapturable).
+            if (backend_->synchronizesHost(n)) {
+                internalError("backend '" + pipeline_->moduleName() + "': prepareCapturable(" + str(n)
+                              + ") and synchronizesHost(" + str(n) + ") are both true");
+            }
             plan = graphPrepare(s, view, src, std::size_t(n) * fpiBytes);
         } else {
             // 7.1 zero the batch's hit counters.
@@ -376,7 +369,7 @@ namespace rtcd::detail {
     }
 
     // -----------------------------------------------------------------------------------------------------------
-    // Graph-prepare experiment (Track G0)
+    // CheckerConfig::graphPrepare (CUDA graph replay of steps 7.1 - 7.3)
     // -----------------------------------------------------------------------------------------------------------
 
     LaunchPlan DetectorCore::graphPrepare(std::uint32_t s, const BatchView& view, DevicePtr src, std::size_t stagingBytes) {
@@ -392,9 +385,9 @@ namespace rtcd::detail {
             }
         }
         if (g == nullptr) {
-            // Capture steps 7.1 - 7.3 once for this (stream, item count). The ray backend's prepare() depends only
-            // on (stream, item count): its kernels' arguments and its plan / params are the same for every batch of
-            // n items on this stream (stable staging / hit-count / per-stream buffers).
+            // Capture steps 7.1 - 7.3 once for this (stream, item count). prepareCapturable(n) promises plain CUDA
+            // work only and a plan / params that depend only on (stream, n): replaying the graph on new contents of
+            // the same staging / hit-count buffers is equivalent to calling prepare() again.
             auto entry       = std::make_unique<PrepareGraph>();
             entry->itemCount = n;
             cudaGraph_t graph = nullptr;

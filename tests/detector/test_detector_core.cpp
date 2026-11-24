@@ -552,6 +552,125 @@ TEST_P(CoreTest, CheckDeviceAndStridedInput) {
     }
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// CheckerConfig::graphPrepare + Backend::prepareCapturable: zero / staging copy / prepare() replayed as a CUDA graph
+// ---------------------------------------------------------------------------------------------------------------
+
+TEST_P(CoreTest, GraphPrepareCapturesOncePerStreamAndItemCount) {
+    FakeBackend* fake = nullptr;
+    FakeOptions o;
+    o.addValue            = 7;
+    o.capturableThreshold = 1;
+    ASSERT_TRUE(cfg.graphPrepare); // default on
+    auto core = makeCore(o, &fake);
+    const std::uint32_t n = 23; // batches 5 5 5 5 3 on streams 0 1 2 0 1: graphs (0,5) (1,5) (2,5) (1,3)
+    for (int rep = 0; rep < 3; ++rep) {
+        const auto in = items(n, rep == 1 ? times3 : plus100); // new contents in the same buffers
+        const auto c  = counts(*core, in, n);
+        for (std::uint32_t i = 0; i < n; ++i) {
+            EXPECT_EQ(c[i], (rep == 1 ? 3 * i + 1 : 100 + i) + 7) << "item " << i << " rep " << rep;
+        }
+        EXPECT_EQ(core->lastStats().batches, 5u);
+        EXPECT_EQ(core->lastStats().launches, 5u);
+    }
+    EXPECT_EQ(fake->calls.size(), 4u) << "prepare() must run once per (stream, item count), at capture";
+    EXPECT_EQ(fake->begins.size(), 3u); // beginCheck still once per check
+
+    // device items at another address: the staging-copy node is re-pointed
+    const auto host     = items(n, times3);
+    DeviceBuffer dItems = DeviceBuffer::fromHost(std::span<const float>(host));
+    DeviceBuffer dHits(std::size_t(n) * sizeof(std::uint32_t));
+    core->checkDevice(DeviceItems{dItems.ptr(), n, 0}, DeviceSpan<std::uint32_t>{dHits.ptr(), n});
+    std::vector<std::uint32_t> out(n);
+    dHits.download(out.data(), out.size() * sizeof(std::uint32_t));
+    for (std::uint32_t i = 0; i < n; ++i) {
+        EXPECT_EQ(out[i], 3 * i + 1 + 7) << "device item " << i;
+    }
+    // strided host items are packed by the upload: still replayed
+    const std::size_t stride = fpi + 3;
+    const auto strided       = items(n, plus100, stride);
+    const auto cs            = counts(*core, strided, n, stride);
+    for (std::uint32_t i = 0; i < n; ++i) {
+        EXPECT_EQ(cs[i], 107 + i);
+    }
+    EXPECT_EQ(fake->calls.size(), 4u);
+    // strided DEVICE items take the direct path (prepare() called for every batch)
+    DeviceBuffer dStrided = DeviceBuffer::fromHost(std::span<const float>(strided));
+    core->checkDevice(DeviceItems{dStrided.ptr(), n, stride}, DeviceSpan<std::uint32_t>{dHits.ptr(), n});
+    dHits.download(out.data(), out.size() * sizeof(std::uint32_t));
+    for (std::uint32_t i = 0; i < n; ++i) {
+        EXPECT_EQ(out[i], 107 + i) << "strided device item " << i;
+    }
+    EXPECT_EQ(fake->calls.size(), 4u + 5u);
+
+    // graphPrepare = false: prepare() every batch
+    CheckerConfig off = cfg;
+    off.graphPrepare  = false;
+    FakeBackend* fake2 = nullptr;
+    auto core2         = makeCore(o, &fake2, &off);
+    counts(*core2, items(n, plus100), n);
+    counts(*core2, items(n, plus100), n);
+    EXPECT_EQ(fake2->calls.size(), 10u);
+}
+
+TEST_P(CoreTest, GraphPrepareManyItemCountsEvictsAndStaysCorrect) {
+    FakeBackend* fake = nullptr;
+    FakeOptions o;
+    o.capturableThreshold = 1;
+    CheckerConfig one = cfg;
+    one.numStreams    = 1;
+    one.maxBatchSize  = 16;
+    auto core         = makeCore(o, &fake, &one);
+    const auto in     = items(kMaxItems, times3);
+    for (int rep = 0; rep < 2; ++rep) {
+        for (std::uint32_t n = 1; n <= 16; ++n) { // 16 item counts > the per-stream cache
+            const auto c = counts(*core, in, n);
+            for (std::uint32_t i = 0; i < n; ++i) {
+                ASSERT_EQ(c[i], 3 * i + 1) << "n " << n << " rep " << rep;
+            }
+        }
+    }
+}
+
+TEST_P(CoreTest, GraphPrepareCaptureErrorIsCleanedUp) {
+    FakeBackend* fake = nullptr;
+    FakeOptions o;
+    o.capturableThreshold = 1;
+    // 23 items: batch 4 (stream 1, 3 items) is the first of its (stream, item count): prepare() throws inside
+    // that capture. Batches 0 - 2 captured (s, 5), batch 3 replays (0, 5).
+    o.throwAtBatch = 4;
+    auto core      = makeCore(o, &fake);
+    const auto in  = items(kMaxItems, times3);
+    std::vector<std::uint8_t> flags(kMaxItems);
+    EXPECT_THROW(core->checkHost(HostItems{in, 23, 0}, flags, {}), InvalidArgument);
+    for (const StreamContext& s : core->streams()) {
+        cudaStreamCaptureStatus status{};
+        EXPECT_EQ(cudaStreamIsCapturing(s.stream, &status), cudaSuccess);
+        EXPECT_EQ(status, cudaStreamCaptureStatusNone) << "stream " << s.index << " left capturing";
+        EXPECT_EQ(cudaStreamQuery(s.stream), cudaSuccess);
+    }
+    const auto c = counts(*core, in, 20); // 4 full batches: replays, results right
+    for (std::uint32_t i = 0; i < 20; ++i) {
+        EXPECT_EQ(c[i], 3 * i + 1);
+    }
+}
+
+TEST_P(CoreTest, CapturableAndSynchronizingIsAnInternalError) {
+    FakeBackend* fake = nullptr;
+    FakeOptions o;
+    o.capturableThreshold = 1;
+    o.syncThreshold       = kBatch;
+    auto core             = makeCore(o, &fake);
+    const auto in         = items(kMaxItems, times3);
+    std::vector<std::uint8_t> flags(kMaxItems);
+    try {
+        core->checkHost(HostItems{in, 10, 0}, flags, {});
+        ADD_FAILURE() << "no exception";
+    } catch (const Error& e) {
+        EXPECT_EQ(e.kind(), ErrorKind::Internal) << e.what();
+    }
+}
+
 TEST_P(CoreTest, WarmupRunsOneFullCapacityCheck) {
     FakeBackend* fake = nullptr;
     auto core         = makeCore({}, &fake);
