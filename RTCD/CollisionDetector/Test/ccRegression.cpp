@@ -128,10 +128,34 @@ namespace {
     }
 } // namespace
 
+// Arguments (any order):
+//   --write-golden                record the golden instead of comparing
+//   --optix key=value[,key=value]  OptiX compile settings, keys see OptixCompileConfig::setField
+//   --curve-single-anyhit         curve build input with OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL
 int main(int argc, char** argv) {
-    const bool writeGolden = argc > 1 && std::string(argv[1]) == "--write-golden";
+    bool writeGolden        = false;
+    bool curveSingleAnyHit  = false;
+    OptixCompileConfig ocfg = OptixCompileConfig::buildDefault();
+    for (int i = 1; i < argc; i++) {
+        const std::string a(argv[i]);
+        if (a == "--write-golden") {
+            writeGolden = true;
+        } else if (a == "--curve-single-anyhit") {
+            curveSingleAnyHit = true;
+        } else if (a == "--optix" && i + 1 < argc) {
+            if (!ocfg.setFields(argv[++i])) {
+                std::cout << "invalid --optix value: " << argv[i] << std::endl;
+                return 2;
+            }
+        } else {
+            std::cout << "unknown argument: " << a << std::endl;
+            return 2;
+        }
+    }
+    std::cout << "[" << MODE << "] optix cfg: " << ocfg.describe()
+              << (curveSingleAnyHit ? " curve-single-anyhit" : "") << std::endl;
 
-    auto [cudaContext, optixContext, streams] = createContextStream<NSTREAM>();
+    auto [cudaContext, optixContext, streams] = createContextStream<NSTREAM>(ocfg);
     auto r                                    = std::make_shared<robot<Dim>>(Config);
 
 #if defined(REG_IAS)
@@ -143,13 +167,23 @@ int main(int argc, char** argv) {
 #else
     auto robotImpl = std::make_shared<batchOptixCurveRobot<CFG>>(r, streams, optixContext);
     auto ccRobot   = std::make_shared<CCWrappedRobot<NSTREAM, TYPE>>(robotImpl);
+    if (curveSingleAnyHit) {
+        robotImpl->setGeometryFlags(OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL);
+    }
 #endif
+    if constexpr (!CURVE) {
+        if (curveSingleAnyHit) {
+            std::cout << "--curve-single-anyhit only applies to curve modes" << std::endl;
+            return 2;
+        }
+    }
     ccRobot->allocPoseBuffer(NITEMS);
 
     std::shared_ptr<scene> s                    = buildSharedScene(CURVE); // loop edges for curves
     std::shared_ptr<baseBatchScene<NSTREAM>> bs = std::make_shared<batchScene<sceneCfg>>(s, streams, optixContext);
 
     CollisionDetector<NSTREAM, TYPE> cc(optixContext, streams);
+    cc.setCompileConfig(ocfg);
     cc.setupScene(bs);
     cc.setupOptix();
     cc.setupRobot(ccRobot);

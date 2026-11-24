@@ -90,7 +90,8 @@ BENCHMARK_TEMPLATE(BM_RAY, 32)
     ->UseRealTime();
 
 int main(int argc, char** argv) {
-    std::tie(cudaContext, optixContext, streams) = createContextStream<NSTREAM>();
+    const OptixCompileConfig optixCfg            = benchmarkOptixConfig(); // RTCD_OPTIX_CFG
+    std::tie(cudaContext, optixContext, streams) = createContextStream<NSTREAM>(optixCfg);
 
     CUDA_SYNC_CHECK();
     r = std::make_shared<robot<Dim>>(Config);
@@ -108,6 +109,11 @@ int main(int argc, char** argv) {
     CC_QUAD = std::make_shared<CollisionDetector<NSTREAM, LinkType::QUADRATIC_CURVE>>(optixContext, streams);
     CCMesh  = std::make_shared<CollisionDetector<NSTREAM, LinkType::MESH>>(optixContext, streams);
     CCRay   = std::make_shared<CollisionDetector<NSTREAM, LinkType::RAY_ONLINE>>(optixContext, streams);
+
+    CC_LIN->setCompileConfig(optixCfg);
+    CC_QUAD->setCompileConfig(optixCfg);
+    CCMesh->setCompileConfig(optixCfg);
+    CCRay->setCompileConfig(optixCfg);
 
     CC_LIN->setupScene(bs);
     CC_LIN->setupOptix();

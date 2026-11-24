@@ -141,6 +141,8 @@ namespace RTCD {
         void updateOBB(const size_t nTraj);
         bool updateWithMask(const CUdeviceptr mask, const size_t nTraj);
         void preAllocCurveBuffer();
+        // Curve build-input geometry flag (OptixGeometryFlags); forces a full rebuild on the next build.
+        void setGeometryFlags(const unsigned int flags);
         void setTemplate(const CUdeviceptr index, const CUdeviceptr radii, const CUdeviceptr segs);
         // Debugging purpose
         void downloadOBBs(std::vector<OBB>& obbs);
@@ -223,6 +225,16 @@ namespace RTCD {
         void setBatchCountHint(const size_t nBatches) override {
             batchCountHint = nBatches;
             applyRefitPolicy();
+        }
+
+        // Geometry flag of the curve build input (default OPTIX_GEOMETRY_FLAG_NONE). The detector's any-hit program
+        // ignores every intersection and only counts hits per trajectory, so collision flags do not depend on it;
+        // OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL disables curve segment splitting (OptiX 9.1 guide, 9.2),
+        // which changes BVH build and trace cost and the hit counts. Call before the first check().
+        void setGeometryFlags(const unsigned int flags) {
+            for (auto& r : robots) {
+                r->setGeometryFlags(flags);
+            }
         }
 
         // Debugging purpose
@@ -343,6 +355,36 @@ namespace RTCD { // Implementation of the streamCurveRobot
 
         // std::cout << "Curve GAS Memory Usage: " << gasBufferSizes.outputSizeInBytes << " bytes and "
         //           << gasBufferSizes.tempSizeInBytes << " bytes as temp buffer." << std::endl;
+    }
+
+    template <batchRobotConfig CFG>
+    void streamCurveRobot<CFG>::setGeometryFlags(const unsigned int flags) {
+        using Base = streamGASRobot<CFG>;
+        if (Base::buildInput.curveArray.flag == flags) {
+            return;
+        }
+        Base::buildInput.curveArray.flag = flags;
+
+        // Buffer sizes may depend on the flag (segment splitting): re-query them for the full batch.
+        const unsigned int nVerts = Base::buildInput.curveArray.numVertices;
+        const unsigned int nPrims = Base::buildInput.curveArray.numPrimitives;
+        Base::buildInput.curveArray.numVertices   = curveCFG.nCPts;
+        Base::buildInput.curveArray.numPrimitives = curveCFG.nSegs;
+        const OptixBuildOperation op              = Base::accelOptions.operation;
+        Base::accelOptions.operation              = OPTIX_BUILD_OPERATION_BUILD;
+        OptixAccelBufferSizes gasBufferSizes;
+        OPTIX_CHECK(optixAccelComputeMemoryUsage(Base::context, &(Base::accelOptions), &(Base::buildInput),
+            1, // Number of build inputs
+            &gasBufferSizes));
+        Base::buildInput.curveArray.numVertices   = nVerts;
+        Base::buildInput.curveArray.numPrimitives = nPrims;
+        Base::accelOptions.operation              = op;
+
+        CUDA_SYNC_CHECK(); // buffers may be reallocated below; earlier builds must be done with them
+        Base::GASBuffer.expandIfNotEnough(gasBufferSizes.outputSizeInBytes);
+        Base::tempBuffer.expandIfNotEnough(std::max(gasBufferSizes.tempSizeInBytes, gasBufferSizes.tempUpdateSizeInBytes));
+        builtNTraj = 0; // a refit must not change the flags of an existing GAS: rebuild next time
+        nRefits    = 0;
     }
 
     template <batchRobotConfig CFG>
