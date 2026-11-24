@@ -7,11 +7,8 @@ from collections import defaultdict, deque
 import argparse
 import xml.dom.minidom
 from scipy.spatial.transform import Rotation
-
-header_base = "./RTCD/robot/models/"
-base_dir = ""
-merged_mesh_dir = "" # will be set based on the passed in URDF file path, declare here for scope
-sphere_dir = "" # will be set based on the passed in URDF file path, declare here for scope
+import copy
+import json
 
 ############################################
 # Utility and Parsing Functions
@@ -29,9 +26,6 @@ class linkt:
 
     def set_leaves(self, leaves):
         self.leaves = leaves
-
-    def set_level(self, level):
-        self.level = level
 
 def parse_urdf(file_path):
     tree = ET.parse(file_path)
@@ -84,86 +78,14 @@ def load_mesh_with_transform(base_dir, mesh_path_rel, origin_R, origin_v, scale_
     if not os.path.isabs(mesh_path_abs):
         mesh_path_abs = os.path.join(base_dir, mesh_path_abs)
     # Load mesh
-    mesh = trimesh.load(mesh_path_abs, force='mesh')
+    mesh = trimesh.load(mesh_path_abs, force="mesh", skip_materials=True)
+    mesh.merge_vertices(merge_norm = True)
     # Apply scale
     mesh.apply_scale(scale_vector)
     # Apply origin transform
     mesh.apply_transform(origin_transform)
     return mesh, mesh_path_rel
 
-def build_graph(root):
-    links = {}
-    for link in root.findall('link'):
-        links[link.get('name')] = link
-
-    graph = defaultdict(list)
-    joints = root.findall('joint')
-
-    graph = {}
-    
-    for link_elem in root.findall('link'):
-        link_name = link_elem.get('name')
-        # Create and store the linkt object
-        graph[link_name] = linkt(link_name)
-    
-    for joint_elem in root.findall('joint'):
-        # The <parent> and <child> tags specify which links this joint connects
-        parent_name = joint_elem.find('parent').get('link')
-        child_name  = joint_elem.find('child').get('link')
-        
-        # Retrieve the linkt objects for parent and child
-        parent_link_obj = graph[parent_name]
-        child_link_obj  = graph[child_name]
-        
-        # Update their relationship
-        child_link_obj.parent = (parent_name, joint_elem)
-        parent_link_obj.children.append((child_name, joint_elem))
-
-    for link in graph.keys():
-        if graph[link].parent is None:
-            root = link
-            break
-
-    return links, joints, graph, root
-
-def find_fixed_groups(links, graph):
-    visited = set()
-    groups = []
-    def is_fixed(j):
-        return j.get('type') == 'fixed'
-
-    for ln in links.keys():
-        if ln not in visited:
-            queue = deque([ln])
-            group = set()
-            while queue:
-                curr = queue.popleft()
-                if curr in visited:
-                    continue
-                visited.add(curr)
-                group.add(curr)
-                if graph[curr].parent is not None:
-                    if is_fixed(graph[curr].parent[1]):
-                        queue.append(graph[curr].parent[0])
-                for nbr, joint in graph[curr].children:
-                    if is_fixed(joint):
-                        queue.append(nbr)
-            groups.append(group)
-    return groups
-
-            
-def print_element(element, level=0):
-    indent = "  " * level
-    print(f"{indent}<{element.tag}", end="")
-    if element.attrib:
-        for key, value in element.attrib.items():
-            print(f' {key}="{value}"', end="")
-    print(">")
-    if element.text and element.text.strip():
-        print(f"{indent}  {element.text.strip()}")
-    for child in element:
-        print_element(child, level + 1)
-    print(f"{indent}</{element.tag}>")
 ############################################
 # Merge Links in a Rigid Group
 ############################################
@@ -297,7 +219,7 @@ def process_link_geometry(link_elem, base_dir):
 #  - visual and collision meshes are merged
 #  - transformation caused by fixed joints are tracked for joint rewiring
 #  - the merged link inherits the name of the first link in the group
-def merge_fixed_links(groups, links, graph, link_mesh_map, new_root):
+def merge_fixed_links(groups, links, graph, link_mesh_map, new_root, base_dir, link_to_meshpath, link_to_merged_trimesh, merged_mesh_dir):
     link_tf_to_ref = {}
     for group in groups:
         # reorder the group so that the first link is the closest to the root
@@ -355,7 +277,7 @@ def merge_fixed_links(groups, links, graph, link_mesh_map, new_root):
         merged_collision = None
 
         # save the merged meshes
-        merged_mesh_path = os.path.join(merged_mesh_dir, ref_link + "_merged").replace("\\", "/")
+        merged_mesh_path = os.path.join(merged_mesh_dir, ref_link).replace("\\", "/")
         for link in group:
             meshViz, meshCol = link_mesh_map[link]
             if meshViz is not None:
@@ -387,6 +309,13 @@ def merge_fixed_links(groups, links, graph, link_mesh_map, new_root):
             visual.append(visual_geom)
 
             new_link.append(visual)
+            
+            link_to_meshpath[ref_link] = os.path.basename(mesh_path + "_visual.obj")
+            link_to_merged_trimesh[ref_link] = merged_visual
+        else:
+            # raise warning
+            print(f"Warning: No visual mesh found for link {ref_link}")
+
         if merged_collision:
             merged_collision.export(merged_mesh_path + "_collision.obj")
             
@@ -405,6 +334,78 @@ def merge_fixed_links(groups, links, graph, link_mesh_map, new_root):
         print_element(new_link)
         ## TODO: merge inertial properties
     return link_tf_to_ref
+
+
+
+def build_graph(root):
+    links = {}
+    for link in root.findall('link'):
+        links[link.get('name')] = link
+
+    graph = defaultdict(list)
+    joints = root.findall('joint')
+
+    graph = {}
+    
+    for link_elem in root.findall('link'):
+        link_name = link_elem.get('name')
+        # Create and store the linkt object
+        graph[link_name] = linkt(link_name)
+    
+    for joint_elem in root.findall('joint'):
+        # The <parent> and <child> tags specify which links this joint connects
+        parent_name = joint_elem.find('parent').get('link')
+        child_name  = joint_elem.find('child').get('link')
+        
+        # Retrieve the linkt objects for parent and child
+        parent_link_obj = graph[parent_name]
+        child_link_obj  = graph[child_name]
+        
+        # Update their relationship
+        child_link_obj.parent = (parent_name, joint_elem)
+        parent_link_obj.children.append((child_name, joint_elem))
+
+    for link in graph.keys():
+        if graph[link].parent is None:
+            root = link
+            break
+
+    return links, joints, graph, root
+
+
+def jointType(joint):
+    T = joint.get('type')
+    if T == 'revolute':
+        return 0
+    if T == 'prismatic':
+        return 1
+    else:
+        return -1
+
+def find_fixed_groups(links, graph):
+    visited = set()
+    groups = []
+    def is_fixed(j):
+        return j.get('type') == 'fixed'
+
+    for ln in links.keys():
+        if ln not in visited:
+            queue = deque([ln])
+            group = set()
+            while queue:
+                curr = queue.popleft()
+                if curr in visited:
+                    continue
+                visited.add(curr)
+                group.add(curr)
+                if graph[curr].parent is not None:
+                    if is_fixed(graph[curr].parent[1]):
+                        queue.append(graph[curr].parent[0])
+                for nbr, joint in graph[curr].children:
+                    if is_fixed(joint):
+                        queue.append(nbr)
+            groups.append(group)
+    return groups
 
 def rewire_joints(links, joints, graph, link_tf_to_ref, new_root, root_link):
 
@@ -459,13 +460,59 @@ def rewire_joints(links, joints, graph, link_tf_to_ref, new_root, root_link):
             new_root.append(new_joint)
             print_element(new_joint)    
 
-def count_dof(root):
-    dof_count = 0
-    for j in root.findall('joint'):
-        jtype = j.get('type')
-        if jtype in ['revolute', 'prismatic']:
-            dof_count += 1
-    return dof_count
+def reorder_elements(root_link, graph, new_root, json_links, link_to_meshpath):
+    # reorder the joints and links so that the order of links and joints reflects breadth first traversal
+    # we will use this order to generate the masks, joint ids, and linkTfIdx
+    ordered_elements = []
+    open_link = deque([root_link])
+
+    lk_name_to_elem = {}
+    lks = new_root.findall('link')
+    for lk in lks:
+        lk_name_to_elem[lk.get('name')] = lk
+
+    jt_name_to_elem = {}
+    jts = new_root.findall('joint')
+    for jt in jts:
+        jt_name_to_elem[jt.get('name')] = jt
+
+    while open_link:
+        curr = open_link.popleft()
+        ln = graph[curr]
+        lk = lk_name_to_elem[curr]
+        ordered_elements.append(copy.deepcopy(lk))
+        json_links[curr] = {
+                "name": curr,
+                "mesh": link_to_meshpath[curr]
+            }
+
+        for child, joint in ln.children:
+            open_link.append(child)
+            ordered_elements.append(copy.deepcopy(jt_name_to_elem[joint.get('name')]))
+
+    # remove all previous joints and links
+    for lk in lks:
+        new_root.remove(lk)
+    for jt in jts:
+        new_root.remove(jt)
+
+    # add the ordered elements
+    for elem in ordered_elements:
+        new_root.append(elem)
+            
+def print_element(element, level=0):
+    indent = "  " * level
+    print(f"{indent}<{element.tag}", end="")
+    if element.attrib:
+        for key, value in element.attrib.items():
+            print(f' {key}="{value}"', end="")
+    print(">")
+    if element.text and element.text.strip():
+        print(f"{indent}  {element.text.strip()}")
+    for child in element:
+        print_element(child, level + 1)
+    print(f"{indent}</{element.tag}>")
+
 ############################################
 # Generating cos/sin/one masks
 ############################################
@@ -557,24 +604,17 @@ def mat_compose(T_const, one_mat, cos_mat, sin_mat):
                 oneMask[i,j] = 1.0
     return oneMask, cosMask, sinMask
 
-############################################
-# Generating connection masks
-############################################
 
-def mark_link_level(ln, graph, level):
-    ln.level = level
-    child_level = level
-    for child, _ in graph[ln.name].children:
-        l = mark_link_level(graph[child], graph, level + 1)
-        child_level = max(child_level, l)
-    return max(child_level, level)
+def count_dof(root):
+    dof_count = 0
+    for j in root.findall('joint'):
+        jtype = j.get('type')
+        if jtype in ['revolute', 'prismatic']:
+            dof_count += 1
+    return dof_count
 
-
-############################################
-# Generating header file for the robot
-############################################
-def generate_header_file(urdf_path, Dim, baseT, lowerBound, upperBound,
-                         sinMask, cosMask, oneMask, connection_map):
+def generate_header_file(header_base, nLinks, urdf_path, Dim, baseT, lowerBound, upperBound,
+                         sinMask, cosMask, oneMask, jointTypes, jointPreTfIdx):
     """
     Generate a .h file in the specified format.
 
@@ -633,17 +673,20 @@ def generate_header_file(urdf_path, Dim, baseT, lowerBound, upperBound,
     oneMask_str = format_array(oneMask, 12)
 
     # Create header content
-    header_content = f"""#pragma once
+    header_content = f"""
+#pragma once
 #include <array>
-#include <Robot/robotConfig.h>
+#include <robot/robotConfig.h>
 #include "config.h"
 
-inline constexpr int Dim = {Dim};
+inline constexpr uint8_t Dim = {Dim};
+inline constexpr uint8_t nLinks = {nLinks};
 inline constexpr std::array<float, 12> baseT{{ {baseT_str} }};
 
-inline constexpr auto connection_map = std::array<int, Dim>{{ {", ".join(str(x) for x in connection_map)} }};
 inline constexpr auto lowerBound = std::array<float, Dim>{{ {", ".join(f"{x}f" for x in lowerBound)} }};
 inline constexpr auto upperBound = std::array<float, Dim>{{ {", ".join(f"{x}f" for x in upperBound)} }};
+inline constexpr auto jointTypes = std::array<uint8_t, Dim>{{ {", ".join(f"{x}" for x in jointTypes)} }};
+inline constexpr auto jointPreTfIdx = std::array<uint8_t, Dim>{{ {", ".join(f"{x}" for x in jointPreTfIdx)} }};
 
 inline constexpr std::array<float,Dim*12> sinMask{{
     {sinMask_str}
@@ -673,131 +716,3 @@ inline constexpr RTCD::robotConfig<Dim> Config{{
         f.write(header_content)
     print(f"Header file generated at {header_file_path}")
 
-############################################
-if __name__ == '__main__':
-
-    ## As a first step, we locate the URDF file and parse it
-    parser = argparse.ArgumentParser(description="Process a URDF file to merge fixed joints and generate header file.")
-    parser.add_argument('urdf_file', type=str, nargs='?', default='./models/RA830/ra830.urdf', help='Path to the URDF file')
-    args = parser.parse_args()
-
-    urdf_file = args.urdf_file
-    base_dir = os.path.dirname(os.path.abspath(urdf_file))
-    merged_mesh_dir = os.path.join(base_dir, "merged_meshes")
-
-    if not os.path.exists(merged_mesh_dir):
-        os.makedirs(merged_mesh_dir)
-
-    # Parse URDF
-    root, tree = parse_urdf(urdf_file)
-
-    # Create a new URDF tree but with only the robot tag
-    new_root = ET.Element('robot', attrib=root.attrib)
-
-    # Create an empty dictionary to store link_name to link_mesh map
-    link_mesh_map = {}
-    
-    for link in root.findall('link'):
-        link_mesh_map[link.get('name')] = process_link_geometry(link, base_dir)
-
-    # Remove fixed joints and merge links
-    links, joints, graph, root_link = build_graph(root)
-    fixed_groups = find_fixed_groups(links, graph)
-    link_ref_tf = merge_fixed_links(fixed_groups, links, graph, link_mesh_map, new_root)
-
-    rewire_joints(links, joints, graph, link_ref_tf, new_root, root_link)
-    
-    modified_urdf_file = os.path.join(base_dir, "modified_" + os.path.basename(urdf_file))
-
-    # write the new urdf to a file with format to enhance readability
-    dom = xml.dom.minidom.parseString(ET.tostring(new_root))
-    pretty_xml_as_string = dom.toprettyxml()
-
-    with open(modified_urdf_file, "w") as f:
-        f.write(pretty_xml_as_string)
-    
-
-    ## Count the number of DOF in the modified URDF
-    mod_root, mod_tree = parse_urdf(modified_urdf_file)
-    dof = count_dof(mod_root)
-    
-    all_cosMask = []
-    all_sinMask = []
-    all_oneMask = []
-    lowerBound = []
-    upperBound = []
-    connection_map = []
-    linkIdMap = {}
-
-    # Rank the links based on the distance to root
-    new_links, new_joints, new_graph, new_root_link = build_graph(mod_root)
-
-    def generate_connection_mask_and_joint_mask(link_name, graph, all_cosMask, all_sinMask, all_oneMask, lower_bound, upper_bound, connection_map, linkIdMap, linkId):
-        linkIdMap[link_name] = linkId
-        for child, joint in graph[link_name].children:
-            cM, sM, oM = generate_masks_for_joint(joint)
-            all_cosMask.extend(cM)
-            all_sinMask.extend(sM)
-            all_oneMask.extend(oM)
-            
-            limit = joint.find('limit')
-            if limit is not None and 'lower' in limit.attrib and 'upper' in limit.attrib:
-                lower = float(limit.attrib['lower'])
-                upper = float(limit.attrib['upper'])
-                lowerBound.append(lower)
-                upperBound.append(upper)
-
-            parent = joint.find('parent').get('link')
-            child = joint.find('child').get('link')
-            parentId = linkIdMap[parent]
-            connection_map.append(parentId)
-            generate_connection_mask_and_joint_mask(child, graph, all_cosMask, all_sinMask, all_oneMask, lower_bound, upper_bound, connection_map, linkIdMap, len(linkIdMap))
-
-
-    generate_connection_mask_and_joint_mask(new_root_link, new_graph, all_cosMask, all_sinMask, all_oneMask, lowerBound, upperBound, connection_map, linkIdMap, 0)
-    
-
-    baseT = [1.0,0.0,0.0,0.0,
-             0.0,1.0,0.0,0.0,
-             0.0,0.0,1.0,0.0]
-
-    generate_header_file(urdf_file,
-                         dof, baseT, lowerBound, upperBound,
-                         all_sinMask, all_cosMask, all_oneMask, connection_map)
-
-    print("cosMask = {")
-    for i in range(0, len(all_cosMask), 12):     
-        print(", ".join(f"{x:.4f}" for x in all_cosMask[i:i+12]))
-    print("};\n")
-
-    print("sinMask = {")
-    for i in range(0, len(all_sinMask), 12):
-        print(", ".join(f"{x:.4f}" for x in all_sinMask[i:i+12]))
-    print("};\n")
-
-    print("oneMask = {")
-    for i in range(0, len(all_oneMask), 12):
-        print(", ".join(f"{x:.4f}" for x in all_oneMask[i:i+12]))
-    print("};\n")
-
-    dof_count = count_dof(mod_root)
-    print(f"Degrees of Freedom: {dof_count}")
-
-    print("lowerBound = {")
-    print(", ".join(f"{x:.4f}" for x in lowerBound))
-    print("};\n")
-
-    print("upperBound = {")
-    print(", ".join(f"{x:.4f}" for x in upperBound))
-    print("};\n")
-
-    print("connection_map = {")
-    print(", ".join(f"{x}" for x in connection_map))
-    print("};\n")
-
-    print("linkIdMap = {")
-    for key, value in linkIdMap.items():
-        print(f'{{"{key}", {value}}},')
-    print("};\n")
-
-    

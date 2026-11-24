@@ -34,9 +34,9 @@ This package implements mesh-to-mesh and mesh-to-robot-sphere-swept-volume colli
 - [Requirements](#requirements)
 - [Build](#build)
 - [Usage](#usage)
-- [Set up a new robot](#set-up-a-new-robot)
+- [Set up a new robot](#set-up-a-new-robot) (full rules and the sphere-generation tool: [docs/How-to-New-Robot.md](docs/How-to-New-Robot.md))
 - [Set up a new mesh collision scene](#set-up-a-new-mesh-collision-scene)
-- [Benchmarks](#benchmarks)
+- [Benchmarks](#benchmarks) (details, cuRobo / FCL comparison, plotting: [docs/Benchmark.md](docs/Benchmark.md))
 - [Status](#status)
 - [Known limitations and findings](#known-limitations-and-findings)
 - User documentation: [configuration reference](docs/user/configuration.md), [architecture in one page](docs/user/architecture.md); design contract: [docs/design/interfaces.md](docs/design/interfaces.md)
@@ -44,6 +44,7 @@ This package implements mesh-to-mesh and mesh-to-robot-sphere-swept-volume colli
 ## TODO
 - [x] Upload the source code.
 - [x] Robot loaded at runtime from its URDF (no hand-written robot header). See [Set up a new robot](#set-up-a-new-robot).
+- [x] URDF parser / sphere-generation tool (`scripts/URDFParser`, [docs/How-to-New-Robot.md](docs/How-to-New-Robot.md)).
 - [x] Runtime configuration from JSON (checker, scene, robot) instead of compile-time template parameters.
 - [x] Port to OptiX 9.1 / CUDA 13.2 (tested on an RTX 5080).
 - [x] Delete the old stack under `RTCD/` (last commit: tag `old-stack-final`).
@@ -148,6 +149,9 @@ Tested (the only configuration the library has been built and run on):
   (Earlier instructions also listed `lz4 tbb flann imgui glfw3` and OpenGL; no CMake file looks for them any
   more.) `tiny_obj_loader.h` is downloaded at configure time, pinned to a fixed commit and hash
   (`cmake/configure_tiny_obj_loader.cmake`).
+
+The Python tools (`scripts/URDFParser`, `scripts/Benchmark/curobo`) need the packages of `requirements.txt`
+(`pip install -r requirements.txt`); the plotting scripts need Julia (`scripts/Project.toml`).
 
 Not tested: Linux (the CMake files still have Linux branches, but the library has never been built there), other
 compilers, Debug builds, other GPUs, other CUDA / OptiX versions (CMake accepts CUDA >= 12.6).
@@ -318,7 +322,8 @@ flags against `tests/data/CCTest/golden_<mode>.bin` (exit code 0 = all passed; `
 `--override "k=v,..."`, `--golden <file>` / `--no-golden`, `--items N`, `--data <dir>`, `--dump-flags <file>`.
 
 ## Set up a new robot
-A robot is described by three things, referenced from a robot file (`configs/robots/panda.json`):
+A robot is loaded at run time from its URDF plus a mesh per link and, for the curve modes, a sphere file per link,
+referenced from a robot file (`configs/robots/panda.json`):
 ```json
 {
   "robot": {
@@ -330,48 +335,12 @@ A robot is described by three things, referenced from a robot file (`configs/rob
   }
 }
 ```
-Optional keys: `"geometry.mesh.files"` / `"geometry.spheres.files"` (`{ "<link name>": "<file>" }`, per-link
-overrides, relative to that `dir`), `"base_pose"` (robot root in the world, a pose object as in the scene file;
-default identity). `spheres` is required by the curve modes only.
-
-**URDF (kinematics, joint limits, which mesh per link).** Read with urdfdom when the robot is loaded:
-- Joints: `revolute` and `continuous` are actuated (continuous joints get the limits [-pi, pi]; a revolute joint
-  must have a `<limit>`); `fixed` joints are folded into the transforms; `prismatic`, `floating`, `planar` and
-  mimic joints are rejected (`UnsupportedError` naming the joint).
-- Links attached by a fixed joint are merged into their parent link (geometry transformed into the parent frame
-  and appended); fixed-attached links without geometry disappear. A chain of geometry-less links joined by fixed
-  joints above the first link with geometry (e.g. a `world` link) is folded into the base pose.
-- After merging the robot must be a **serial chain**: link 0 is the root, link j + 1 the child of actuated joint j.
-  A branch with two actuated joints is rejected. **1 <= DOF <= 16** (`kMaxDof` in `include/rtcd/limits.h`).
-- Joint values in a pose are in chain order root to tip (`RobotModel::jointNames()`), radians.
-
-**Link meshes (`geometry.mesh`).** Every link of the chain, link 0 included, must end up with a mesh:
-- The URDF element of each link selected by `"source"` (`"visual"`, default, or `"collision"`) must be one
-  `<mesh>`: several `<visual>` (resp. `<collision>`) elements on one link and primitive shapes (box, cylinder,
-  sphere) are rejected. Its `<origin>` and its `scale` are applied; only uniform positive scales are accepted.
-- File: `mesh.files[<link name>]` if given, otherwise `mesh.dir / <file name of the URDF filename>`: the directory
-  part of the URDF path is dropped (`meshes/visual/link7_nohand.obj` -> `<dir>/link7_nohand.obj`, also for
-  `package://...` URIs).
-- Format `"obj"` only (tinyobjloader, triangulated); units meters, link frame. The loader does not require
-  watertight robot meshes; the Panda setup uses simplified watertight meshes. Mesh size matters for speed:
-  `mesh` mode builds one GAS per link mesh, `ray` mode traces every unique edge of every link mesh.
-
-**Sphere files (`geometry.spheres`, curve modes).** The robot's approximation by spheres, one file per URDF link
-that has geometry, including links merged by fixed joints:
-- File: `spheres.files[<link name>]` if given, otherwise `spheres.dir / <link name>.txt`
-  (`models/franka_description/spheres/panda_link0.txt` ... `panda_link7.txt`). A missing file is an `IoError`.
-- Format `"xyzr"`: UTF-8 text, one sphere per line, `x y z r` (four floats, whitespace separated, link frame,
-  meters, `r > 0`); empty lines and lines starting with `#` are skipped; any other line is an `IoError` with its
-  line number. An empty file gives the link zero spheres. Spheres of merged links are transformed into the parent
-  link frame.
-- Write the files with any tool you like (one sphere per line, as above).
-
-Check a new robot without a GPU: `rtcd::RobotModel::load(rtcd::loadRobotDesc("my_robot.json"))` throws a precise
-error for each rule above and reports DOF, joint names, limits and per-link geometry. Then reference the robot file
-from a setup file and run `rtcd_example` on it. Only the Franka Panda has been tested; the features beyond it
-(fixed-joint merging, URDF origins and scales, continuous joints, arbitrary joint axes) are implemented but not
-covered by any test robot.
-
+Nothing is generated or compiled per robot. Serial chains of revolute / continuous joints (fixed joints merged),
+1 to 16 DOF; meshes in meters; each link's mesh is `<mesh dir>/<file name of the URDF mesh>`; sphere files are
+`<spheres dir>/<link name>.txt` with one `x y z r` line per sphere. The full rules, and how to generate sphere files
+with the URDF parser tool in `scripts/URDFParser` (Python, `requirements.txt`), are in
+**[docs/How-to-New-Robot.md](docs/How-to-New-Robot.md)**. Check a new robot without a GPU with
+`rtcd::RobotModel::load(rtcd::loadRobotDesc("my_robot.json"))`; only the Franka Panda has been tested.
 ## Set up a new mesh collision scene
 A scene file lists the obstacles (`configs/scenes/shelf_simple.json`):
 ```json
@@ -411,21 +380,10 @@ goldens) and `shelf_dense.json`.
 </p>
 
 ### RTCD Benchmarks
-The Google Benchmark apps are `rtcd_bench_discrete` (poses, `mesh` and `ray`) and `rtcd_bench_curve`
-(trajectories), built by `AllNew` into `build/bin/apps`. They time `CollisionChecker::checkDevice` on poses or KNN
-trajectories sampled from the cached inputs under `tests/data/motions` (8192 poses and their 4 nearest neighbours,
-committed). The scene is a runtime option, so one executable serves all three scenes:
-```bash
-build/bin/apps/rtcd_bench_discrete --scene configs/scenes/shelf_dense.json --benchmark_out=<file>.json
-```
-App options: `--scene <scene.json>` (default `configs/scenes/shelf.json`), `--robot <robot.json>` (default
-`configs/robots/panda.json`), `--data <dir>`; every other argument goes to Google Benchmark. The environment
-variable `RTCD_OVERRIDES` changes the checker configs they build.
-
-The scripts in the repository root run both apps over the three scenes and write the Google Benchmark JSON where
-the plotting scripts read it: `data/Benchmark/result/discrete/{denseShelf,shelf,shelfSimple}.json` and
-`data/Benchmark/result/curve/{cur_denseShelf,cur_shelf,cur_shelfSimple}.json` (`data/` is the local, gitignored
-output folder):
+The Google Benchmark apps `rtcd_bench_discrete` (poses) and `rtcd_bench_curve` (trajectories) time
+`CollisionChecker::checkDevice` on the committed inputs of `tests/data/motions`; the scene is a runtime option
+(`--scene`). The scripts in the repository root run both over the three scenes and write the JSON results to
+`data/Benchmark/result/{discrete,curve}/`, where the plotting scripts read them:
 ```bash
 ./benchmark.sh  [--only discrete|curve] [--build <dir>] [--out <dir>] [-- <Google Benchmark args>]   # Linux
 ```
@@ -433,39 +391,8 @@ output folder):
 .\benchmark.bat [--only discrete|curve] [--build <dir>] [--out <dir>] [--no-pause] ["<GB arg>" ...]
 ```
 On Windows invoke the batch file with a path (`.\benchmark.bat`): PowerShell does not run a script from the
-current directory by its bare name. `--build` defaults to `./build` (executables in `<build>/bin/apps`, or
-`<build>/bin/apps/Release` for the Visual Studio generator), `--out` to `./data/Benchmark/result`; quote Google
-Benchmark arguments that contain `=` for `cmd` (`"--benchmark_filter=BM_IAS"`). The benchmark names and argument
-ranges are those of the old stack's executables, so results stay comparable with earlier ones. Running the whole
-suite takes a while (a few minutes per executable and scene).
-
-### Curobo Benchmarks
-We modified the curobo library to disable self-collision and other constraints in order for a fair comparison. To run the curobo benchmark, first install a customized version of curobo [here](https://github.com/Ssz990220/curobo).
-
-The scripts for curobo benchmarking can be found in `scripts/Benchmark/curobo`.
-
-### FCL Benchmarks
-
-We use Moveit Interface for FCL benchmarking. Benchmark setup and source code can be found [here](https://github.com/Ssz990220/rtcc_benchmark).
-
-### Plot the result
-**To plot the result, make sure you run RTCD Benchmarks and Curobo Benchmarks first.**
-
-First you need to install julia (>1.10 recommended). And `cd scripts`
-```julia
-using Pkg
-Pkg.activate(.)
-# Hit "]", the terminal should start with `(scripts) pkg>`
-instantiate # This would install all the required packages for plotting and may take a while.
-```
-With the above command, you setup the env. Now back to a bash to plot the results.
-```bash
-julia -O3 ./scripts/Benchmark/plots/discrete/resultAnalysis.jl # For discrete poses benchmark results
-julia -O3 ./scripts/Benchmark/plots/curve/resultAnalysisEff.jl # For continuous benchmark results
-```
-
-The plots will be in `./data/Benchmark/Plots/{discrete,curve}/`.
-
+current directory by its bare name. App options, the cuRobo and FCL comparisons and plotting (Julia):
+**[docs/Benchmark.md](docs/Benchmark.md)**. Running the whole suite takes a while.
 ## Status
 Measured on Windows, RTX 5080, Release build:
 - **Correctness.** Through the public `CollisionChecker`, the library reproduces all four goldens (recorded with
