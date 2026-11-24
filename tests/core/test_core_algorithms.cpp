@@ -1,6 +1,6 @@
 // rtcd_core GPU tests (new_gpu): internal/algorithms.h against host references (scan, binarization, stable
-// compaction, basic OBB overlap sanity). Bit-identity of obbOverlapCounts with the old BBCDRobotMask is in
-// test_core_legacy_parity.cpp.
+// compaction, basic OBB overlap sanity). Bit-identity of obbOverlapCounts with the old BBCDRobotMask (stored counts)
+// is in test_core_obb_reference.cpp.
 #include <rtcd/context.h>
 #include <rtcd/device_buffer.h>
 #include <rtcd/errors.h>
@@ -248,7 +248,7 @@ TEST(CoreAlgorithms, CompactByFlagsEdgeCasesAndErrors) {
     EXPECT_GE(compactScratchBytes(8192, 80), compactScratchBytes(5, 80));
 }
 
-// ---- obbOverlapCounts sanity (exact parity with the old kernel: test_core_legacy_parity) ------------------------
+// ---- obbOverlapCounts sanity (exact parity with the old kernel: test_core_obb_reference) ------------------------
 
 TEST(CoreAlgorithms, ObbOverlapCountsSanity) {
     Env env;

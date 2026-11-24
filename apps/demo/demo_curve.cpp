@@ -1,5 +1,5 @@
 // rtcd_demo_curve: new-stack port of RTCD/Demo/DemoCollisionDetectorCurve.cpp (old demoLinContinuous /
-// demoQuadContinuous; the mode now comes from the setup: apps/demo/setups/demo_linear.json, demo_quad.json).
+// demoQuadContinuous; the mode now comes from the setup: configs/setups/demo_linear.json, demo_quad.json).
 // Checks N short straight-line joint-space trajectories for N = 1, 2, 4, ..., 4096 and prints the number of
 // colliding trajectories and an indicative time per check. Options and flow: demo_common.h.
 //

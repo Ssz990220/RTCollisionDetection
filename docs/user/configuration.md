@@ -202,8 +202,9 @@ The file is an object with one key `"robot"`; in a setup file the block can also
 | `robot.geometry.spheres.files` | object `{ "<link name>": path }` | `{}` | per-link sphere file overrides; relative entries are resolved against `spheres.dir` (or the robot file's directory if `dir` is not set) |
 | `robot.base_pose` | pose object | identity | robot root -> world |
 
-File naming rules, URDF rules and the sphere format: README, section "Set up a new robot" (authoritative text:
-the loading rules in `include/rtcd/robot_model.h`).
+File naming rules, URDF rules, the sphere format and the sphere-generation tool:
+[docs/How-to-New-Robot.md](../How-to-New-Robot.md) (authoritative text: the loading rules in
+`include/rtcd/robot_model.h`).
 
 ## Overrides and dumps
 - `rtcd::applyOverrides(config, "path=value,path=value")`: dotted paths of the checker schema, JSON values; bare

@@ -32,17 +32,17 @@ namespace rtcd::demo {
                << " [--setup <setup.json | name>] [--override \"path=value,...\"] [--counts 1-4096]\n"
                   "       [--repeats R] [--seed S]"
                << (kind == Kind::Curve ? " [--step F]" : "") << "\n"
-               << "  --setup  a setup JSON, or a name of apps/demo/setups/<name>.json ("
+               << "  --setup  a setup JSON, or a name of configs/setups/<name>.json ("
                << (kind == Kind::Discrete ? "demo_ias (default), demo_ray" : "demo_linear (default), demo_quad")
                << ")\n"
                   "Times printed are indicative only (host check() incl. upload/download), not benchmark results.\n";
             std::exit(code);
         }
 
-        // apps/demo/setups/<name>.json, searched upwards from the working directory, then from the directory of
+        // configs/setups/<name>.json, searched upwards from the working directory, then from the directory of
         // argv[0] (the executable when it was started with a path, as ctest and the scripts do).
         fs::path findNamedSetup(const std::string& name, const char* argv0) {
-            const fs::path rel = fs::path("apps") / "demo" / "setups" / (name + ".json");
+            const fs::path rel = fs::path("configs") / "setups" / (name + ".json");
             std::error_code ec;
             const fs::path exeDir = argv0 ? fs::absolute(fs::path(argv0), ec).parent_path() : fs::path{};
             for (fs::path start : {fs::current_path(), exeDir}) {

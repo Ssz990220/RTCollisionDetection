@@ -1,11 +1,11 @@
-// tests/backend_curve: the curve kernels of src/backend_curve (curve_kernels.h) vs the old ones (new_gpu).
+// tests/backend_curve: the curve kernels of src/backend_curve (curve_kernels.h) (new_gpu).
 //
-// OLD-STACK PARITY TEST: links rtcd_legacy_kernels and calls the old batchFkineSphrTraj (fused), batchFkineTraj +
-// batchSphrCntrTraj + batchGenControlPoints (unfused) and genCurveOBB<1|2> (RTCD/Robot/robot.cu, sweptVolume.cu),
-// with the hand-written pandas.h masks / base in their __constant__ globals and the spline weights loaded by the old
-// fillWeight. The new kernels get the table of the URDF-loaded RobotModel and the weights in device buffers.
-// Outputs must be equal BYTE FOR BYTE. Both sides use the RobotModel's sphere arrays (their equality with the old
-// robot<DOF> arrays is rtcd_robot's business). Delete with the old stack (keep the new-only checks).
+// Stored reference tests/data/reference/curve_kernels.txt: FNV-1a hashes of the OLD kernels' outputs
+// (batchFkineSphrTraj, batchFkineTraj + batchSphrCntrTraj + batchGenControlPoints, genCurveOBB<1>; written before
+// the old stack was removed) on the regression trajectories, with the Panda of configs/robots/panda.json and the
+// spline weights of configs/spline_weights. The new kernels must reproduce them BYTE FOR BYTE. Plus self-contained
+// checks: fused == unfused, segment OBBs contain their segments (both degrees), segment compaction vs a host
+// reference.
 #include "backend_curve/curve_kernels.h"
 
 #include <rtcd/device_buffer.h>
@@ -16,34 +16,23 @@
 
 #include <support/inputs.h>
 #include <support/paths.h>
-
-#include <Robot/models/pandas.h> // old: cosMask, sinMask, oneMask, baseT, Dim
-#include <Robot/robot.cuh>       // old FK / sphere-center / fused kernels
+#include <support/reference.h>
 
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 
-#include <array>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
-#include <iostream>
 #include <random>
 #include <string>
 #include <vector>
 
-// Old sweptVolume.cu functions (declared here instead of including sweptVolume.cuh, which declares __global__
-// templates that a host compiler cannot parse). Same signatures, so they link against rtcd_legacy_kernels.
-cudaError_t fillWeight(float* weights, size_t nWeights);
-void batchGenControlPoints(
-    float* trajPoints, float* controlPoints, size_t nCurves, cudaStream_t stream, size_t nCPts, size_t nTPts);
-template <int degree>
-void genCurveOBB(const CUdeviceptr cPts, const CUdeviceptr segs, const CUdeviceptr radii, CUdeviceptr obb,
-    const size_t nSegs, const cudaStream_t stream);
-
 using namespace rtcd;
-namespace fs = std::filesystem;
+namespace fs  = std::filesystem;
+namespace sup = rtcd::support;
 
 namespace {
 
@@ -56,17 +45,13 @@ namespace {
             if (cudaMalloc(&p, b) != cudaSuccess) {
                 p = nullptr;
             }
-            cudaMemset(p, 0xA5, b); // poison: unwritten bytes must also agree
+            cudaMemset(p, 0xA5, b); // poison: unwritten bytes show in the hash
         }
         DevMem(DevMem&& o) noexcept : p(o.p), bytes(o.bytes) { o.p = nullptr; }
         DevMem(const DevMem&)            = delete;
         DevMem& operator=(const DevMem&) = delete;
         ~DevMem() { cudaFree(p); }
         DevicePtr ptr() const { return reinterpret_cast<DevicePtr>(p); }
-        template <typename T>
-        DeviceSpan<T> span() const {
-            return {ptr(), bytes / sizeof(T)};
-        }
         template <typename T>
         std::vector<T> download() const {
             std::vector<T> v(bytes / sizeof(T));
@@ -97,7 +82,7 @@ namespace {
         return n;
     }
 
-    // Values must be real numbers (guards "both sides wrote nothing / garbage").
+    // Values must be real numbers (guards "the kernel wrote nothing / garbage").
     std::size_t countNonFinite(const DevMem& a, std::size_t floats) {
         const auto v  = a.download<float>();
         std::size_t n = 0;
@@ -105,6 +90,20 @@ namespace {
             n += !std::isfinite(v[i]) || std::fabs(v[i]) > 100.f;
         }
         return n;
+    }
+
+    const sup::ReferenceFile& reference() {
+        static const sup::ReferenceFile f = sup::ReferenceFile::load(sup::referenceDir() / "curve_kernels.txt");
+        return f;
+    }
+
+    void expectMatchesReference(const std::string& key, const DevMem& m, std::size_t bytes) {
+        ASSERT_TRUE(reference().has(key)) << key;
+        ASSERT_EQ(reference().integer(key, 0), bytes) << key;
+        auto v = m.download<unsigned char>();
+        v.resize(bytes);
+        EXPECT_EQ(sup::hex64(sup::fnv1a(v)), sup::hex64(reference().hash(key, 1)))
+            << key << ": output differs from the old kernels' (stored hash)";
     }
 
     std::vector<float> readWeights(const fs::path& f) {
@@ -124,11 +123,7 @@ namespace {
             if (cudaGetDeviceCount(&n) != cudaSuccess || n == 0) {
                 return;
             }
-            setFkineMasks(cosMask.data(), sinMask.data(), oneMask.data(), cosMask.size());
-            std::array<float, 12> base = baseT;
-            setBaseAffine(base);
-            cudaDeviceSynchronize();
-            robot_ = RobotModel::load(loadRobotDesc(support::configsDir() / "robots" / "panda.json"));
+            robot_ = RobotModel::load(loadRobotDesc(sup::configsDir() / "robots" / "panda.json"));
         }
         static void TearDownTestSuite() { robot_.reset(); }
 
@@ -138,7 +133,8 @@ namespace {
                 GTEST_SKIP() << "no CUDA device";
             }
             ASSERT_TRUE(robot_);
-            ASSERT_EQ(robot_->dof(), static_cast<std::uint32_t>(Dim));
+            dof_     = robot_->dof();
+            ASSERT_EQ(dof_, 7u);
             table_   = internal::uploadKinematics(robot_->kinematics());
             centers_ = std::make_unique<DevMem>(DevMem::from(robot_->sphereCenters()));
             links_   = std::make_unique<DevMem>(DevMem::from(robot_->sphereLink()));
@@ -147,127 +143,109 @@ namespace {
 
         std::vector<float> trajectories(std::uint32_t points, std::size_t n) {
             // the cache holds the 4096-sample set only; take the first n of its trajectories
-            std::vector<float> v = support::regressionInputs(support::dataDir() / "motions", points, 4096, robot_->dof());
+            std::vector<float> v = sup::regressionInputs(sup::dataDir() / "motions", points, 4096, robot_->dof());
             v.resize(n * points * robot_->dof());
             return v;
         }
 
-        // Loads the weights into the old __constant__ tables and returns them for the new device buffer.
         std::vector<float> loadWeights(const char* degreeDir, std::uint32_t ctrl, std::uint32_t traj) {
-            const fs::path f = support::configsDir() / "spline_weights" / degreeDir / "normal"
+            const fs::path f = sup::configsDir() / "spline_weights" / degreeDir / "normal"
                              / (std::to_string(ctrl) + "_" + std::to_string(traj) + ".txt");
             std::vector<float> w = readWeights(f);
             EXPECT_EQ(w.size(), std::size_t(ctrl) * traj) << f;
-            EXPECT_EQ(fillWeight(w.data(), w.size()), cudaSuccess);
             return w;
         }
+
+        internal::KinematicsRef kin() const { return internal::KinematicsRef{&robot_->kinematics(), table_.ptr()}; }
 
         static inline std::shared_ptr<const RobotModel> robot_;
         DeviceBuffer table_;
         std::unique_ptr<DevMem> centers_, links_;
-        std::uint32_t S_ = 0;
+        std::uint32_t S_   = 0;
+        std::uint32_t dof_ = 0;
     };
 
     constexpr std::uint32_t kT = 16;
 
 } // namespace
 
-TEST_F(CurveKernels, FusedLinearBitIdenticalToBatchFkineSphrTraj) {
-    ASSERT_TRUE(curve::fusedCurvePointsSupported(Dim, kT, S_, 0));
-    const std::vector<float> q = trajectories(kT, 4096);
-    const DevMem dq            = DevMem::from(q);
-    for (std::uint32_t n : {1u, 37u, 128u, 4096u}) {
+TEST_F(CurveKernels, FusedLinearPointsMatchTheStoredReference) {
+    ASSERT_TRUE(curve::fusedCurvePointsSupported(dof_, kT, S_, 0));
+    for (std::uint32_t n : {37u, 4096u}) {
+        const DevMem dq          = DevMem::from(trajectories(kT, n));
         const std::size_t floats = std::size_t(n) * S_ * kT * 3;
-        DevMem o(floats * 4), nw(floats * 4);
-        batchFkineSphrTraj(dq.ptr(), static_cast<const float*>(centers_->p), static_cast<const int*>(links_->p),
-            static_cast<float*>(o.p), Dim, kT, n, S_, 0, nullptr);
-        curve::fusedCurvePoints(table_.ptr(), Dim, dq.ptr(), centers_->ptr(), links_->ptr(), 0, nw.ptr(), kT, n, S_, 0,
+        DevMem nw(floats * 4);
+        curve::fusedCurvePoints(table_.ptr(), dof_, dq.ptr(), centers_->ptr(), links_->ptr(), 0, nw.ptr(), kT, n, S_, 0,
             nullptr);
         CK(cudaDeviceSynchronize());
-        EXPECT_EQ(countWordDiffs(o, nw, floats), 0u) << "n " << n;
+        expectMatchesReference("fused_linear_points." + std::to_string(n), nw, floats * 4);
         EXPECT_EQ(countNonFinite(nw, floats), 0u) << "n " << n;
     }
 }
 
-TEST_F(CurveKernels, UnfusedLinearBitIdenticalToOldAndToFused) {
-    const std::vector<float> q = trajectories(kT, 512);
-    const DevMem dq            = DevMem::from(q);
-    for (std::uint32_t n : {1u, 37u, 512u}) {
-        const std::size_t tfFloats = std::size_t(n) * (Dim + 1) * kT * 12;
-        const std::size_t floats   = std::size_t(n) * S_ * kT * 3;
-        DevMem oTf(tfFloats * 4), nTf(tfFloats * 4), o(floats * 4), nw(floats * 4), fused(floats * 4);
-        batchFkineTraj(dq.ptr(), oTf.ptr(), Dim, kT, n, nullptr);
-        batchSphrCntrTraj(static_cast<float*>(oTf.p), static_cast<float*>(centers_->p), static_cast<float*>(o.p), kT, n,
-            static_cast<const int*>(links_->p), S_, Dim, nullptr);
-        internal::trajectoryLinkPoses(internal::KinematicsRef{&robot_->kinematics(), table_.ptr()},
-            dq.span<const float>(), kT, n, nTf.span<float>(), nullptr);
-        curve::sphereCentersTraj(nTf.ptr(), centers_->ptr(), links_->ptr(), nw.ptr(), kT, n, S_, Dim, nullptr);
-        curve::fusedCurvePoints(table_.ptr(), Dim, dq.ptr(), centers_->ptr(), links_->ptr(), 0, fused.ptr(), kT, n, S_,
-            0, nullptr);
-        CK(cudaDeviceSynchronize());
-        EXPECT_EQ(countWordDiffs(oTf, nTf, tfFloats), 0u) << "link poses, n " << n;
-        EXPECT_EQ(countWordDiffs(o, nw, floats), 0u) << "centers, n " << n;
-        EXPECT_EQ(countWordDiffs(fused, nw, floats), 0u) << "fused vs unfused, n " << n;
-        EXPECT_EQ(countNonFinite(nw, floats), 0u);
-    }
+TEST_F(CurveKernels, UnfusedLinearMatchesTheStoredReferenceAndTheFusedKernel) {
+    const std::uint32_t n      = 512;
+    const DevMem dq            = DevMem::from(trajectories(kT, n));
+    const std::size_t tfFloats = std::size_t(n) * (dof_ + 1) * kT * 12;
+    const std::size_t floats   = std::size_t(n) * S_ * kT * 3;
+    DevMem nTf(tfFloats * 4), nw(floats * 4), fused(floats * 4);
+    internal::trajectoryLinkPoses(kin(), DeviceSpan<const float>{dq.ptr(), dq.bytes / 4}, kT, n,
+        DeviceSpan<float>{nTf.ptr(), nTf.bytes / 4}, nullptr);
+    curve::sphereCentersTraj(nTf.ptr(), centers_->ptr(), links_->ptr(), nw.ptr(), kT, n, S_, dof_, nullptr);
+    curve::fusedCurvePoints(table_.ptr(), dof_, dq.ptr(), centers_->ptr(), links_->ptr(), 0, fused.ptr(), kT, n, S_, 0,
+        nullptr);
+    CK(cudaDeviceSynchronize());
+    expectMatchesReference("unfused_link_poses.512", nTf, tfFloats * 4);
+    expectMatchesReference("unfused_sphere_centers.512", nw, floats * 4);
+    EXPECT_EQ(countWordDiffs(fused, nw, floats), 0u) << "fused vs unfused";
+    EXPECT_EQ(countNonFinite(nw, floats), 0u);
 }
 
-TEST_F(CurveKernels, FusedAndUnfusedControlPointsBitIdenticalToOld) {
+TEST_F(CurveKernels, FusedAndUnfusedControlPointsMatchTheStoredReference) {
     struct Case {
         const char* dir;
         std::uint32_t ctrl, traj;
     };
     for (const Case c : {Case{"quad", 8, 16}, Case{"cubic", 8, 16}, Case{"quad", 4, 8}, Case{"quad", 6, 12},
              Case{"quad", 4, 128}}) {
-        SCOPED_TRACE(std::string(c.dir) + " " + std::to_string(c.ctrl) + "_" + std::to_string(c.traj));
-        const std::vector<float> w = loadWeights(c.dir, c.ctrl, c.traj);
-        const DevMem dw            = DevMem::from(w);
+        const std::string name = std::string(c.dir) + "." + std::to_string(c.ctrl) + "_" + std::to_string(c.traj);
+        SCOPED_TRACE(name);
+        const DevMem dw            = DevMem::from(loadWeights(c.dir, c.ctrl, c.traj));
         const std::uint32_t n      = c.traj > 16 ? 64u : 300u;
-        const std::vector<float> q = trajectories(c.traj, n);
-        const DevMem dq            = DevMem::from(q);
-        const std::size_t tfFloats = std::size_t(n) * (Dim + 1) * c.traj * 12;
+        const DevMem dq            = DevMem::from(trajectories(c.traj, n));
+        const std::size_t tfFloats = std::size_t(n) * (dof_ + 1) * c.traj * 12;
         const std::size_t tFloats  = std::size_t(n) * S_ * c.traj * 3;
         const std::size_t cFloats  = std::size_t(n) * S_ * c.ctrl * 3;
-        DevMem oTf(tfFloats * 4), oT(tFloats * 4), oC(cFloats * 4);
         DevMem nTf(tfFloats * 4), nT(tFloats * 4), nC(cFloats * 4);
-        // old unfused: batchFkineTraj -> batchSphrCntrTraj -> batchGenControlPoints
-        batchFkineTraj(dq.ptr(), oTf.ptr(), Dim, c.traj, n, nullptr);
-        batchSphrCntrTraj(static_cast<float*>(oTf.p), static_cast<float*>(centers_->p), static_cast<float*>(oT.p),
-            c.traj, n, static_cast<const int*>(links_->p), S_, Dim, nullptr);
-        batchGenControlPoints(static_cast<float*>(oT.p), static_cast<float*>(oC.p), std::size_t(n) * S_, nullptr, c.ctrl,
-            c.traj);
-        // new unfused
-        internal::trajectoryLinkPoses(internal::KinematicsRef{&robot_->kinematics(), table_.ptr()},
-            dq.span<const float>(), c.traj, n, nTf.span<float>(), nullptr);
-        curve::sphereCentersTraj(nTf.ptr(), centers_->ptr(), links_->ptr(), nT.ptr(), c.traj, n, S_, Dim, nullptr);
+        internal::trajectoryLinkPoses(kin(), DeviceSpan<const float>{dq.ptr(), dq.bytes / 4}, c.traj, n,
+            DeviceSpan<float>{nTf.ptr(), nTf.bytes / 4}, nullptr);
+        curve::sphereCentersTraj(nTf.ptr(), centers_->ptr(), links_->ptr(), nT.ptr(), c.traj, n, S_, dof_, nullptr);
         curve::controlPoints(nT.ptr(), nC.ptr(), dw.ptr(), n * S_, c.ctrl, c.traj, nullptr);
         CK(cudaDeviceSynchronize());
-        EXPECT_EQ(countWordDiffs(oC, nC, cFloats), 0u) << "unfused control points";
+        expectMatchesReference("control_points." + name, nC, cFloats * 4);
         EXPECT_EQ(countNonFinite(nC, cFloats), 0u);
 
-        const bool fusedOk = curve::fusedCurvePointsSupported(Dim, c.traj, S_, c.ctrl);
-        EXPECT_EQ(fusedOk, fkineSphrTrajSupported(Dim, c.traj, S_, c.ctrl)) << "support predicate (DOF <= 8 here)";
+        // the fused kernel exists exactly where the old one did (support predicate; DOF <= 8 here)
+        const bool fusedOk = curve::fusedCurvePointsSupported(dof_, c.traj, S_, c.ctrl);
+        EXPECT_EQ(fusedOk, reference().has("fused_control_points." + name)) << "support predicate";
         if (fusedOk) {
-            DevMem oF(cFloats * 4), nF(cFloats * 4);
-            batchFkineSphrTraj(dq.ptr(), static_cast<const float*>(centers_->p), static_cast<const int*>(links_->p),
-                static_cast<float*>(oF.p), Dim, c.traj, n, S_, c.ctrl, nullptr);
-            curve::fusedCurvePoints(table_.ptr(), Dim, dq.ptr(), centers_->ptr(), links_->ptr(), dw.ptr(), nF.ptr(),
+            DevMem nF(cFloats * 4);
+            curve::fusedCurvePoints(table_.ptr(), dof_, dq.ptr(), centers_->ptr(), links_->ptr(), dw.ptr(), nF.ptr(),
                 c.traj, n, S_, c.ctrl, nullptr);
             CK(cudaDeviceSynchronize());
-            EXPECT_EQ(countWordDiffs(oF, nF, cFloats), 0u) << "fused control points vs old fused";
+            expectMatchesReference("fused_control_points." + name, nF, cFloats * 4);
             EXPECT_EQ(countWordDiffs(nF, nC, cFloats), 0u) << "fused vs unfused";
         }
     }
 }
 
-TEST_F(CurveKernels, SegmentObbsContainTheSegmentAndMatchGenCurveOBB) {
+TEST_F(CurveKernels, SegmentObbsContainTheSegmentAndLinearOnesMatchTheStoredReference) {
     for (const bool inject : {false, true})
     for (std::uint32_t degree : {1u, 2u}) {
         SCOPED_TRACE("degree " + std::to_string(degree) + (inject ? " with injected degenerate vertices" : " real points"));
         const std::uint32_t n   = 256;
         const std::uint32_t vpc = degree == 1 ? kT : 8u;
-        const std::vector<float> q = trajectories(kT, n);
-        const DevMem dq            = DevMem::from(q);
+        const DevMem dq         = DevMem::from(trajectories(kT, n));
         std::vector<float> w(1, 0.f);
         if (degree == 2) {
             w = loadWeights("quad", 8, kT);
@@ -275,7 +253,7 @@ TEST_F(CurveKernels, SegmentObbsContainTheSegmentAndMatchGenCurveOBB) {
         const DevMem dw = DevMem::from(w);
         const std::size_t vFloats = std::size_t(n) * S_ * vpc * 3;
         DevMem pts(vFloats * 4);
-        curve::fusedCurvePoints(table_.ptr(), Dim, dq.ptr(), centers_->ptr(), links_->ptr(), dw.ptr(), pts.ptr(), kT, n,
+        curve::fusedCurvePoints(table_.ptr(), dof_, dq.ptr(), centers_->ptr(), links_->ptr(), dw.ptr(), pts.ptr(), kT, n,
             S_, degree == 1 ? 0 : vpc, nullptr);
         // topology as in the backend (old curveParam)
         const std::uint32_t spc = vpc - degree;
@@ -297,68 +275,47 @@ TEST_F(CurveKernels, SegmentObbsContainTheSegmentAndMatchGenCurveOBB) {
         const DevMem ds = DevMem::from(segStart);
         const DevMem dr = DevMem::from(radii);
         const auto nSegs = static_cast<std::uint32_t>(segStart.size());
-        DevMem o(nSegs * sizeof(Obb)), nw(nSegs * sizeof(Obb));
-        if (degree == 1) {
-            genCurveOBB<1>(pts.ptr(), ds.ptr(), dr.ptr(), o.ptr(), nSegs, nullptr);
-        } else {
-            genCurveOBB<2>(pts.ptr(), ds.ptr(), dr.ptr(), o.ptr(), nSegs, nullptr);
-        }
+        DevMem nw(nSegs * sizeof(Obb));
         curve::curveSegmentObbs(degree, pts.ptr(), ds.ptr(), dr.ptr(), nw.ptr(), nSegs, nullptr);
         CK(cudaDeviceSynchronize());
 
         // Containment: every box must hold the balls of radius r around the segment's control points (a linear
         // segment / quadratic B-spline segment lies in the convex hull of its control points, so this makes the
-        // culling conservative). Non-finite boxes are skipped: they never test as separated (every SAT comparison
-        // with NaN is false), so their segments are always kept.
-        const auto hp = pts.download<float>();
-        auto notContained = [&](const DevMem& boxes, std::size_t& nonFiniteBoxes) {
-            const auto ob   = boxes.download<Obb>();
-            std::size_t bad = 0;
-            nonFiniteBoxes  = 0;
-            for (std::uint32_t i = 0; i < nSegs; ++i) {
-                const Obb& b   = ob[i];
-                const float* f = reinterpret_cast<const float*>(&b);
-                bool finite    = true;
-                for (int k = 0; k < 15; ++k) finite &= std::isfinite(f[k]);
-                if (!finite) {
-                    ++nonFiniteBoxes;
-                    continue;
-                }
-                bool in       = true;
-                double excess = 0;
-                for (std::uint32_t k = 0; k <= degree; ++k) {
-                    const float* p = &hp[(segStart[i] + k) * 3];
-                    for (int a = 0; a < 3; ++a) {
-                        double d = 0;
-                        for (int x = 0; x < 3; ++x) d += double(p[x] - b.center[x]) * b.axes[a][x];
-                        const double e = std::fabs(d) + radii[segStart[i]] - b.halfSize[a];
-                        excess         = (std::max)(excess, e);
-                        in &= e <= 1e-5;
-                    }
-                }
-                if (!in && bad < 3 && &boxes == &nw) {
-                    ADD_FAILURE() << "segment " << i << " exceeds its box by " << excess;
-                }
-                bad += !in;
+        // culling conservative). Boxes must be finite (a non-finite box never tests as separated).
+        const auto hp   = pts.download<float>();
+        const auto ob   = nw.download<Obb>();
+        std::size_t bad = 0, nonFinite = 0;
+        for (std::uint32_t i = 0; i < nSegs; ++i) {
+            const Obb& b   = ob[i];
+            const float* f = reinterpret_cast<const float*>(&b);
+            bool finite    = true;
+            for (int k = 0; k < 15; ++k) finite &= std::isfinite(f[k]);
+            if (!finite) {
+                ++nonFinite;
+                continue;
             }
-            return bad;
-        };
-        std::size_t nonFiniteNew = 0, nonFiniteOld = 0;
-        EXPECT_EQ(notContained(nw, nonFiniteNew), 0u) << "new segment OBBs must contain the segment";
-        const std::size_t oldBad = notContained(o, nonFiniteOld);
+            bool in       = true;
+            double excess = 0;
+            for (std::uint32_t k = 0; k <= degree; ++k) {
+                const float* p = &hp[(segStart[i] + k) * 3];
+                for (int a = 0; a < 3; ++a) {
+                    double d = 0;
+                    for (int x = 0; x < 3; ++x) d += double(p[x] - b.center[x]) * b.axes[a][x];
+                    const double e = std::fabs(d) + radii[segStart[i]] - b.halfSize[a];
+                    excess         = (std::max)(excess, e);
+                    in &= e <= 1e-5;
+                }
+            }
+            if (!in && bad < 3) {
+                ADD_FAILURE() << "segment " << i << " exceeds its box by " << excess;
+            }
+            bad += !in;
+        }
+        EXPECT_EQ(bad, 0u) << "segment OBBs must contain the segment";
+        EXPECT_EQ(nonFinite, 0u);
         if (degree == 1) {
-            EXPECT_EQ(countWordDiffs(o, nw, std::size_t(nSegs) * 15), 0u) << "linear: bit-identical to the old kernel";
-            EXPECT_EQ(nonFiniteNew, 0u);
-            EXPECT_EQ(oldBad, 0u);
-        } else {
-            // Old OBB_3p anchored two of its three cases at the wrong vertex and broke down for near-collinear points
-            // (NaN / non-orthogonal frames); documents the fixed old bugs.
-            EXPECT_GT(oldBad, 0u) << "the old quadratic OBBs were expected to miss part of some segments";
-            EXPECT_EQ(nonFiniteNew, 0u);
-            std::cout << "[ info ] " << (inject ? "with injected degenerate vertices" : "real control points")
-                      << ": quadratic segment OBBs: old kernel " << oldBad << " of " << nSegs
-                      << " finite boxes not containing their segment and " << nonFiniteOld
-                      << " non-finite boxes; new kernel 0 and " << nonFiniteNew << "\n";
+            expectMatchesReference(std::string("linear_segment_obbs.") + (inject ? "injected" : "real"), nw,
+                std::size_t(nSegs) * sizeof(Obb));
         }
     }
     EXPECT_THROW(curve::curveSegmentObbs(3, 0, 0, 0, 0, 1, nullptr), UnsupportedError);
@@ -405,4 +362,3 @@ TEST_F(CurveKernels, CompactSegmentsMatchesHostReference) {
     }
     EXPECT_EQ(bad, 0u);
 }
-

@@ -1,5 +1,5 @@
 // rtcd_demo_discrete: new-stack port of RTCD/Demo/DemoCollisionDetectorDisc.cpp (old demoIAS / demoRAY; the mode
-// now comes from the setup: apps/demo/setups/demo_ias.json, demo_ray.json). Checks N random poses drawn uniformly
+// now comes from the setup: configs/setups/demo_ias.json, demo_ray.json). Checks N random poses drawn uniformly
 // within the robot's joint limits (the old demo used its cached Halton poses within the pandas.h bounds) for
 // N = 1, 2, 4, ..., 4096 and prints the number of colliding poses and an indicative time per check. Options and
 // flow: demo_common.h.

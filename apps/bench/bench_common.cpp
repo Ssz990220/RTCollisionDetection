@@ -40,7 +40,7 @@ namespace rtcd::bench {
                          "  --scene  shelf (default) | shelf_simple | shelf_dense (= configs/scenes/<name>.json) or a\n"
                          "           scene JSON path\n"
                          "  --robot  robot JSON (default configs/robots/panda.json)\n"
-                         "  --data   data folder holding motions/ (default: env RTCD_DATA_DIR, else <repo>/data)\n"
+                         "  --data   data folder holding motions/ (default: env RTCD_DATA_DIR, else <repo>/tests/data)\n"
                          "Environment: RTCD_OPTIX_CFG, RTCD_CURVE_GEOM_FLAG, RTCD_BM_REFIT_EVERY (old syntax), then\n"
                          "RTCD_OVERRIDES (\"path=value,...\", rtcd::applyOverrides) for every checker.\n"
                          "Google Benchmark's own options: --help.\n";

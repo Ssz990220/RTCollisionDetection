@@ -1,5 +1,6 @@
 #pragma once
-// support/inputs.h -- the deterministic collision-check inputs cached under data/motions, read exactly as the old
+// support/inputs.h -- the deterministic collision-check inputs cached under tests/data/motions (committed; see
+// tests/data/README.md; <motions> below is dataDir()/motions), read exactly as the old
 // harness reads them (RTCD/Utils/Test/poseUtils.h randomMotions / KNearestNeighbor / genCSpaceKNNTraj and
 // RTCD/CollisionDetector/Test/ccRegression.cpp loadInputs), so the new stack is checked and timed on
 // byte-identical inputs.
@@ -7,13 +8,13 @@
 // Cache layout (old naming, unchanged):
 //   <motions>/<robot><n>.bin                               n poses, dof float32 each (old randomMotions)
 //   <motions>/<robot>/<weights>/<n>_knn<k>_idx.bin         n * k int32 neighbour indices (old KNearestNeighbor)
-//   <motions>/<robot>/<weights>/<n>_knn<k>_dis.bin         n * n float32 distances (not needed here)
+//   <motions>/<robot>/<weights>/<n>_knn<k>_dis.bin         n * n float32 distances (never read; not committed)
 // <robot> is the OLD robot name ("Panda", RTCD/Robot/models/pandas.h Config), <weights> the old
 // concatFloatsAsInts(weight) ("1111111" for the unit weights of the regression and the benchmarks).
 //
 // The old harness generated a missing cache (Halton samples within the pandas.h bounds, GPU KNN). This module only
-// reads: a missing or malformed cache file throws rtcd::IoError (design doc Q7: inputs stay identical; regenerate
-// with the old stack if ever needed). The flat output layout is the new stack's item layout (rtcd/types.h):
+// reads: a missing or malformed cache file throws rtcd::IoError (design doc Q7: inputs stay identical; the only
+// generator is the removed old stack, tag old-stack-final). The flat output layout is the item layout (rtcd/types.h):
 // [item][waypoint][joint], packed.
 
 #include <cstddef>

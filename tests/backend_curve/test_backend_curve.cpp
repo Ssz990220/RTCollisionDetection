@@ -229,8 +229,9 @@ TEST_F(CurveBackendTest, ProgramSetMatchesModeAndGasFlags) {
 
 // Refits do NOT leave the flags exactly unchanged: a refitted curve GAS can report a grazing hit that a fresh build
 // misses (or the reverse). Measured: quad with {"every": 3} flips item 4065 (last batch, a refit) to "collides"; the
-// OLD stack does exactly the same (rtcd_sbs_shelf --profile reg_quad --old-only --golden --reps 0 --refit-every 3:
-// "1 diffs ... diff at item 4065: 1 vs 0"), so this is OptiX behaviour, not a porting error. Policies that never
+// OLD stack did exactly the same (measured with its side-by-side runner before it was removed; stored with every other
+// refit deviation in tests/data/reference/refit_flags.txt, test_refit_reference.cpp), so this is OptiX behaviour,
+// not a porting error. Policies that never
 // refit must match the golden exactly; the others within a couple of grazing items.
 TEST_F(CurveBackendTest, EveryRefitPolicyGivesTheGoldenFlags) {
     constexpr std::size_t kRefitTolerance = 2;

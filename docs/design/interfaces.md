@@ -1,5 +1,14 @@
 # RTCD new stack: interface design (Stage 0-B, amended in Stage 0-C)
 
+> **The old stack has been removed (Stage 3-D).** The header-only code under `RTCD/` was deleted from this branch
+> together with its CMake, the side-by-side runner (`apps/side_by_side`) and every parity test that called it; the
+> last commit that contains it is tag **`old-stack-final`** (`632b6a5`). Its outputs survive as stored references
+> (`tests/data/reference`, written from the old stack just before the deletion) and the goldens, regression and
+> benchmark inputs moved from the untracked `data/` folder into the repository (`tests/data/CCTest`,
+> `tests/data/motions`; `tests/data/README.md`). Everything below that names `RTCD/...` files, old classes, parity
+> tests against the old stack or `data/CCTest` / `data/motions` is HISTORY: it records where each piece came from.
+> The old -> new mapping tables (sections 4, 5 and 6) are kept for that reason.
+
 > **FROZEN as of commit `b4948ee` on branch `optix9-upgrade`** (the merge of Stage 0-C; Stage 0-C was based on
 > `c46667d`).
 > Since then: comment-only clarifications at Wave-1 close-out, and comment-only clarifications at Wave-2 close-out

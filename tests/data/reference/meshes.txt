@@ -1,0 +1,123 @@
+# Mesh summaries from the OLD loader RTCD::meshModel (RTCD/Meshes/mesh.h), written by
+# tests/geometry/test_geometry_parity.cpp (RTCD_WRITE_REFERENCE). Format: tests/support/mesh_reference.h.
+# link.<name>: meshModel(urdfLink, meshes/Simplified/watertight/, spheres/) of panda.urdf (the old robot loader);
+# obstacle.<file>@x,y,z: meshModel(models/<file>, translation, scale 1) of the three shelf scenes;
+# rotated.curobo/Sheep.obj: fromXyzRpy(0.1, -0.2, 0.3, 0.3, -0.7, 1.1), scale 1.7.
+link.panda_link0.vertices 1488 0xf3a6b6f8074427c5
+link.panda_link0.triangles 3000 0xb6488582bd20cbfa
+link.panda_link0.unique_edges 4497 0x46dccbaf90f6bac6
+link.panda_link0.loop_edges 5235 0x5d5cdd72822f66e9
+link.panda_link0.obb 0xbd2b8cbf 0x3b80428d 0x3d4e6cd9 0x3dfbc196 0x3dc136d8 0x3db43520 0x3f6dfc0a 0x3c98c332 0x3ebc6e5e 0x3c048a93 0x3f7f5895 0xbd915aca 0xbebca09f 0x3d8d3916 0x3f6d5684
+link.panda_link0.spheres 4 0xbf03d99626e7e828 0x1e8bcb5a3c27629c
+link.panda_link1.vertices 1502 0x984a6d12b1a0a05c
+link.panda_link1.triangles 3000 0x5e0c8f2c25953515
+link.panda_link1.unique_edges 4499 0x9e5b86ed7bd9f02c
+link.panda_link1.loop_edges 5241 0xb68c5046a987ba68
+link.panda_link1.obb 0x3ab04dbc 0xbccaaa2d 0xbd93835e 0x3e137eff 0x3d847b60 0x3db73f6b 0xb9f17450 0x3f0a3b4a 0xbf5778bb 0xbf7ae42c 0xbe2b9339 0xbddb0b07 0xbe4b8ce6 0x3f5328b8 0x3f077e29
+link.panda_link1.spheres 13 0x323ce90f7c035706 0xa91268df58504bfc
+link.panda_link2.vertices 1502 0xe05e50c67fe9cee8
+link.panda_link2.triangles 3000 0x56d639992a1f1064
+link.panda_link2.unique_edges 4500 0x4850bfb4b8531ca0
+link.panda_link2.loop_edges 5242 0x106912e9fff4d5fd
+link.panda_link2.obb 0x3ae2b170 0xbd94e616 0x3cc7109a 0x3e146029 0x3d8b0f7e 0x3db669b6 0x3b4ebc4a 0x3f58c72c 0x3f082be0 0xbf75fc40 0xbe1438c0 0x3e71cbf4 0x3e8dcbe1 0xbf0308fb 0x3f502e4b
+link.panda_link2.spheres 8 0x06997da5a91b39ed 0x46b17df3250ab869
+link.panda_link3.vertices 1496 0x3244e98c5af1ff44
+link.panda_link3.triangles 3000 0x16b6209a29eaefab
+link.panda_link3.unique_edges 4500 0x8bf2962e5329aa9b
+link.panda_link3.loop_edges 5234 0x16ac137a65831cb1
+link.panda_link3.obb 0x3d2f2cc3 0x3c84cba6 0xbd26c185 0x3e01ed6a 0x3d8c8833 0x3d950747 0x3f2c9a60 0x3efd5464 0x3f0c5b83 0xbf13992b 0x3f510b75 0xbce49a71 0xbeec4bb9 0xbe9836f4 0x3f55f946
+link.panda_link3.spheres 5 0x64bc7eb8d816adcf 0xe23b77055a229e1c
+link.panda_link4.vertices 1496 0x88b2f93e8e2f511e
+link.panda_link4.triangles 3000 0x40b10cfee7c5de87
+link.panda_link4.unique_edges 4499 0xc8ada7e7d0d2c161
+link.panda_link4.loop_edges 5262 0x26a58e5ccf557e6f
+link.panda_link4.obb 0xbd1e6353 0x3d2f2072 0x3c7a3808 0x3e030630 0x3d9d3900 0x3d8add58 0x3f2885c0 0xbf12d885 0x3ef99461 0x3e991fda 0x3f4b266b 0x3f07a990 0xbf30d881 0xbe4fefe2 0x3f31a630
+link.panda_link4.spheres 6 0xbf4340e851172af5 0x7f55b9acf3bb292f
+link.panda_link5.vertices 1502 0x978f675c91ffe0f4
+link.panda_link5.triangles 3000 0x28ad0242c2d08dbe
+link.panda_link5.unique_edges 4499 0x00e3a60ba4d99502
+link.panda_link5.loop_edges 5229 0xb6ae7928a77ce3f9
+link.panda_link5.obb 0x3b1ddd35 0x3d19f6fc 0xbde049c5 0x3e30ced4 0x3d9c7401 0x3d617af4 0x3c257b91 0x3eb69a05 0x3f6f26cd 0xbd3faa1a 0x3f6ef1e7 0xbeb62f51 0xbf7fb4de 0xbd24544a 0x3cd5f0f0
+link.panda_link5.spheres 16 0xc1e32b02ce551072 0xf560f2c4e6fc2ddc
+link.panda_link6.vertices 1502 0x6600b5167b77daad
+link.panda_link6.triangles 3000 0xf31ad8e7ee841460
+link.panda_link6.unique_edges 4497 0x41094749fc8bb2ab
+link.panda_link6.loop_edges 5273 0xdc54d4aeb2e394b2
+link.panda_link6.obb 0x3d380ed7 0x3b167428 0x3c0b63a7 0x3dbe444a 0x3d95911e 0x3d3b7e1c 0x3f71b84a 0x3e7256c4 0xbe6a80eb 0xbe79cc23 0x3f7843b2 0xbb6cc07a 0x3e628ac7 0x3d72cb3b 0x3f7931ec
+link.panda_link6.spheres 5 0x23a72e45d5d7d8e7 0x54d14645852f1551
+link.panda_link7.vertices 1502 0x3a1952f5f2e18892
+link.panda_link7.triangles 3000 0xecd6228b13d446da
+link.panda_link7.unique_edges 4500 0xa9fff2ab3a909fae
+link.panda_link7.loop_edges 5246 0x77c25cac81dee6f1
+link.panda_link7.obb 0x3c47b698 0x3c347d0b 0x3d9e257c 0x3d90cab1 0x3d34ea9c 0x3cfc08f2 0x3f3c7e8a 0x3f2b8d81 0xbdbfed83 0xbf2c2c15 0x3f3d71ac 0x3bf6525e 0x3d9858a3 0x3d6b7d78 0x3f7eddba
+link.panda_link7.spheres 5 0xb1132648a4f3edfc 0x9abe4e659c9231b7
+obstacle.curobo/shelves.obj@0.45,0,0.4.vertices 56 0x2ddf4a82e489bc38
+obstacle.curobo/shelves.obj@0.45,0,0.4.triangles 108 0xf0b7d6e048394190
+obstacle.curobo/shelves.obj@0.45,0,0.4.unique_edges 162 0x1db8c07ebb3e7810
+obstacle.curobo/shelves.obj@0.45,0,0.4.loop_edges 185 0xb35de7df256e5b75
+obstacle.curobo/shelves.obj@0.45,0,0.4.obb 0x3ee5a1ca 0xbb11535c 0x3ecd3459 0x3e9997b4 0x3ecf1286 0x3e1a3442 0xb1c8c878 0xbf800000 0x3901ccf5 0x3844cb0c 0xb901ccf5 0xbf800000 0x3f800000 0xae1c5d00 0x3844cb0c
+obstacle.curobo/bin.obj@0,-0.6,0.vertices 3723 0xbe4e57be0682a242
+obstacle.curobo/bin.obj@0,-0.6,0.triangles 7450 0x441f324029bab76d
+obstacle.curobo/bin.obj@0,-0.6,0.unique_edges 11175 0xaf57275865b3b3d5
+obstacle.curobo/bin.obj@0,-0.6,0.loop_edges 12950 0xd076c8c17b63ab65
+obstacle.curobo/bin.obj@0,-0.6,0.obb 0x388102c8 0xbf19992c 0x3dd6f398 0x3e8f9ca6 0x3e5896b0 0x3dd9861c 0x3f7ffe2a 0x3bf4876c 0x3a31df0d 0xbbf4a4ee 0x3f7ffd3e 0x3baf0667 0xba276a36 0xbbaf2f9f 0x3f7fff0d
+obstacle.curobo/bin.obj@0,0.6,0.vertices 3723 0xf88158f9f0468f11
+obstacle.curobo/bin.obj@0,0.6,0.triangles 7450 0x441f324029bab76d
+obstacle.curobo/bin.obj@0,0.6,0.unique_edges 11175 0xaf57275865b3b3d5
+obstacle.curobo/bin.obj@0,0.6,0.loop_edges 12950 0xd076c8c17b63ab65
+obstacle.curobo/bin.obj@0,0.6,0.obb 0x3880fa29 0x3f199a08 0x3dd6f399 0x3e8f9ca7 0x3e5896b4 0x3dd9861d 0x3f7ffe2a 0x3bf48837 0x3a31df15 0xbbf4a5ba 0x3f7ffd3e 0x3baf06e7 0xba276a2f 0xbbaf3020 0x3f7fff0e
+obstacle.curobo/Bob.obj@-0.4,0,0.vertices 5344 0xb1a3bb9694326048
+obstacle.curobo/Bob.obj@-0.4,0,0.triangles 10688 0x0d83563b4d023c41
+obstacle.curobo/Bob.obj@-0.4,0,0.unique_edges 16032 0x5423177e27dd6ce1
+obstacle.curobo/Bob.obj@-0.4,0,0.loop_edges 17512 0x6f73f3ea743cd595
+obstacle.curobo/Bob.obj@-0.4,0,0.obb 0x3eec766c 0x3ed33bea 0x3e2a15a2 0x3e34e3b4 0x3e0c2a01 0x3db703ca 0x80000000 0xbf169015 0x3f4f0b08 0x3f800000 0x00000000 0x00000000 0x80000000 0x3f4f0b08 0x3f169015
+obstacle.curobo/Cow.obj@-0.4,0,0.vertices 2930 0xbbf6beeb83be2d86
+obstacle.curobo/Cow.obj@-0.4,0,0.triangles 5856 0x1258c74eb9893001
+obstacle.curobo/Cow.obj@-0.4,0,0.unique_edges 8784 0x777a438388cab9f1
+obstacle.curobo/Cow.obj@-0.4,0,0.loop_edges 9860 0x163eae4ce8f6e18d
+obstacle.curobo/Cow.obj@-0.4,0,0.obb 0x3ec68af8 0xbe3253b7 0x3f1ba7a9 0x3ddba1a8 0x3d8b4250 0x3d4ff648 0x00000000 0xbf393f6c 0xbf30b094 0x00000000 0xbf30b094 0x3f393f6c 0xbf800000 0x80000000 0x80000000
+obstacle.curobo/Fish.obj@-0.4,0,0.vertices 7106 0x92398a1b8988f4d8
+obstacle.curobo/Fish.obj@-0.4,0,0.triangles 14208 0x4378cc7efa536464
+obstacle.curobo/Fish.obj@-0.4,0,0.unique_edges 21312 0x378323063ea30a0c
+obstacle.curobo/Fish.obj@-0.4,0,0.loop_edges 23477 0x9e4c0b735d3de939
+obstacle.curobo/Fish.obj@-0.4,0,0.obb 0x3ee1e2de 0x3e1fcdf3 0x3d931f07 0x3de81daa 0x3d8b99d2 0x3d62b068 0x00000000 0x3f7ffa83 0x3c540ee0 0x00000000 0x3c540ee0 0xbf7ffa83 0xbf800000 0x80000000 0x80000000
+obstacle.curobo/Sheep.obj@-0.4,0,0.vertices 1229 0x8e5552393566b760
+obstacle.curobo/Sheep.obj@-0.4,0,0.triangles 2432 0x0c9a1b9ee6eb6256
+obstacle.curobo/Sheep.obj@-0.4,0,0.unique_edges 3660 0xc5d60ada35f46918
+obstacle.curobo/Sheep.obj@-0.4,0,0.loop_edges 4457 0x58361c581e3da31f
+obstacle.curobo/Sheep.obj@-0.4,0,0.obb 0x3ecc1944 0x3e500a5b 0x3f1d1392 0x3e39dba2 0x3da69aa3 0x3da47a90 0x3f708cfe 0x3eaf1f89 0x3c04ba4c 0xbea993be 0x3f6a5261 0xbe6a9cef 0xbdafadd0 0x3e59b4fc 0x3f792e81
+obstacle.curobo/Snakeboard.obj@-0.4,0,0.vertices 11807 0x0b0e0af63a30d8be
+obstacle.curobo/Snakeboard.obj@-0.4,0,0.triangles 23554 0xe9dfc6baf955780a
+obstacle.curobo/Snakeboard.obj@-0.4,0,0.unique_edges 35331 0x77fa15766aa41526
+obstacle.curobo/Snakeboard.obj@-0.4,0,0.loop_edges 36322 0xc3141a9756ab8095
+obstacle.curobo/Snakeboard.obj@-0.4,0,0.obb 0x3e1f433a 0x3e2de217 0x3e366c0a 0x3e6e215c 0x3dc2495f 0x3d1ff357 0x3f124f4f 0xb71e4203 0x3f5211f2 0xb856a872 0xbf800000 0x37ca94a2 0x3f5211f2 0xb86a08ff 0xbf124f4f
+obstacle.curobo/bin_dense.obj@0,-0.6,0.vertices 6477 0x8c24feecccaa8af9
+obstacle.curobo/bin_dense.obj@0,-0.6,0.triangles 12955 0xf7f24d9874d33cfd
+obstacle.curobo/bin_dense.obj@0,-0.6,0.unique_edges 19433 0x078d6d58eecd376e
+obstacle.curobo/bin_dense.obj@0,-0.6,0.loop_edges 22326 0x3ab28c2830186105
+obstacle.curobo/bin_dense.obj@0,-0.6,0.obb 0xb9115300 0xbf19996d 0x3dd70260 0x3e904ef2 0x3e58cbfc 0x3ddfbe37 0x3f7ff870 0x3c0c9a07 0xbc4d6731 0x3c0bae5d 0xbf7ffcf3 0xbb9460fd 0xbc4e07b6 0x3b90dc00 0xbf7ffa2d
+obstacle.curobo/bin_dense.obj@0,0.6,0.vertices 6477 0x4e416cff9f2831d7
+obstacle.curobo/bin_dense.obj@0,0.6,0.triangles 12955 0xf7f24d9874d33cfd
+obstacle.curobo/bin_dense.obj@0,0.6,0.unique_edges 19433 0x078d6d58eecd376e
+obstacle.curobo/bin_dense.obj@0,0.6,0.loop_edges 22326 0x3ab28c2830186105
+obstacle.curobo/bin_dense.obj@0,0.6,0.obb 0xb9115200 0x3f1999c7 0x3dd70260 0x3e904ef2 0x3e58cbfe 0x3ddfbe34 0x3f7ff870 0x3c0c9aa1 0xbc4d6733 0x3c0baef9 0xbf7ffcf3 0xbb9460af 0xbc4e07ba 0x3b90db77 0xbf7ffa2e
+obstacle.curobo/Face1.obj@-0.4,0,0.vertices 19985 0xc637072e1c77dd6a
+obstacle.curobo/Face1.obj@-0.4,0,0.triangles 39856 0xb500933a022356a6
+obstacle.curobo/Face1.obj@-0.4,0,0.unique_edges 59840 0x80b17e8765caa843
+obstacle.curobo/Face1.obj@-0.4,0,0.loop_edges 65409 0x7272e59e38f03836
+obstacle.curobo/Face1.obj@-0.4,0,0.obb 0x3f066609 0x3e4f6be5 0x3ec08e5e 0x3db09dea 0x3d784ba2 0x3d40b47e 0xbeda5aea 0xb49044ae 0xbf678d47 0xb55f79d8 0xbf800000 0x35391ebf 0xbf678d47 0x358c8a9f 0x3eda5aea
+obstacle.curobo/Face2.obj@-0.4,0,0.vertices 19985 0xd829eb43b7d6f04c
+obstacle.curobo/Face2.obj@-0.4,0,0.triangles 39856 0xb500933a022356a6
+obstacle.curobo/Face2.obj@-0.4,0,0.unique_edges 59840 0x80b17e8765caa843
+obstacle.curobo/Face2.obj@-0.4,0,0.loop_edges 65409 0x7272e59e38f03836
+obstacle.curobo/Face2.obj@-0.4,0,0.obb 0x3f064c5e 0x33169ab6 0x3ec0561f 0x3db17ba3 0x3d78b264 0x3d42ae71 0xbecdc71f 0xb4a0024c 0xbf6a69f6 0xb5ba3230 0xbf800000 0x357ad26e 0xbf6a69f6 0x35dce658 0x3ecdc71f
+obstacle.curobo/Face3.obj@-0.4,0,0.vertices 19985 0x0ea727449597cecd
+obstacle.curobo/Face3.obj@-0.4,0,0.triangles 39856 0xb500933a022356a6
+obstacle.curobo/Face3.obj@-0.4,0,0.unique_edges 59840 0x80b17e8765caa843
+obstacle.curobo/Face3.obj@-0.4,0,0.loop_edges 65409 0x7272e59e38f03836
+obstacle.curobo/Face3.obj@-0.4,0,0.obb 0x3f0661b5 0xbe5773e2 0x3ebfeb67 0x3db20b49 0x3d85cab0 0x3d413d69 0xbebdfa51 0xb296acc1 0xbf6db991 0xb55e6aa6 0xbf800000 0x34bbe2a6 0xbf6db991 0x35716578 0x3ebdfa51
+rotated.curobo/Sheep.obj.vertices 1229 0x8cc091437036cd5c
+rotated.curobo/Sheep.obj.triangles 2432 0x0c9a1b9ee6eb6256
+rotated.curobo/Sheep.obj.unique_edges 3660 0xc5d60ada35f46918
+rotated.curobo/Sheep.obj.loop_edges 4457 0x58361c581e3da31f
+rotated.curobo/Sheep.obj.obb 0x3e6c3208 0x3dd621c6 0x4000f38a 0x3e9dfab1 0x3e0d9d0a 0x3e0bce96 0x3ba7a596 0x3f39a3a9 0x3f304602 0x3f7839fd 0xbe301629 0x3e3210a5 0x3e7a5f3c 0x3f2ab172 0xbf343a42

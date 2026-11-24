@@ -16,7 +16,7 @@ namespace rtcd::support {
         std::vector<T> readElements(const fs::path& file) {
             std::ifstream in(file, std::ios::binary);
             if (!in) {
-                throw IoError("cannot open input cache file (the old harness generates it; see support/inputs.h)",
+                throw IoError("cannot open input cache file (committed under tests/data/motions; see tests/data/README.md)",
                     file);
             }
             in.seekg(0, std::ios::end);

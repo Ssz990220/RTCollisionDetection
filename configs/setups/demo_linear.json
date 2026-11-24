@@ -1,0 +1,6 @@
+{
+  "checker": { "mode": "linear_curve", "streams": 4, "max_batch_size": 128, "max_items_per_check": 4096,
+               "obb_culling": false, "curve": { "trajectory_points": 16, "gas_build": "fast_build" } },
+  "scene": "../scenes/shelf_dense.json",
+  "robot": "../robots/panda.json"
+}

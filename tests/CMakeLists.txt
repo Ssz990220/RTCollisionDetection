@@ -1,9 +1,10 @@
-# Tests of the new stack (only configured with BUILD_TESTS=ON; the agent build helper always sets it).
+# Tests (only configured with BUILD_TESTS=ON; the agent build helper always sets it).
 #
 # ctest label convention:
 #   new_unit    new stack, no GPU needed (parsing, validation, host-side logic)
 #   new_gpu     new stack, needs a GPU (kernels, OptiX pipelines, collision flags vs. the goldens)
-#   regression  the old stack's four golden tests (RTCD/CollisionDetector/CMakeLists.txt; unchanged)
+#   regression  the golden regression entries rtcd_regression_* (tests/apps, tests/backend_ray; also new_gpu), the
+#               meaning the label had for the removed old stack's ccRegression_<mode> tests
 # Run with `ctest -L <label>` (agents: agent_test.ps1 -Label <label>).
 #
 # One folder per library or topic (tests/core, tests/config, tests/json, tests/geometry, tests/scene,
@@ -11,7 +12,7 @@
 #   rtcd_add_new_test(<name> LABEL new_unit|new_gpu SOURCES ... LIBS ...)
 # (cmake/RTCDTargets.cmake); folders are picked up automatically at configure time. tests/support (library
 # rtcd_testsupport) is added by the top-level CMakeLists.txt instead. Tests run from the repository root, so the
-# shared data is ./data and configs are ./configs.
+# reference data is ./tests/data (tests/data/README.md) and configs are ./configs.
 
 # ---- compile-only checks of the public headers (part of AllNew; nothing is linked or run) ----
 # "Public headers are plain C++20": these targets see ONLY include/ (no CUDA, no OptiX, no other library) and

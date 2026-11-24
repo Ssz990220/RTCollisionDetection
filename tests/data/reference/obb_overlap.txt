@@ -1,0 +1,35 @@
+# Per-robot-box overlap counts of the OLD RTCD::BBCDRobotMask (RTCD/CollisionDetector/BBCollisionDetection.cu)
+# on the cases of tests/core/obb_reference_cases.h, written by tests/core/test_core_legacy_parity.cpp
+# (RTCD_WRITE_REFERENCE). <case> <robot boxes with a non-zero count> <FNV-1a of all uint32 counts>.
+random.1x1 0 0x4d25767f9dce13f5
+random.31x1 3 0x47e2e8aa73ec8bd4
+random.33x1 1 0x6b50845da143bbc4
+random.9216x1 507 0x21d1c16f5d759cf4
+random.32773x1 914 0xa9ae83ee5c665d25
+random.1x3 0 0x4d25767f9dce13f5
+random.31x3 2 0xa8bcb1b7bee30015
+random.33x3 3 0x85b737b1ebd716d4
+random.9216x3 1381 0xefe9caa45c64c437
+random.32773x3 3698 0x6e6307d6cc54cb66
+random.1x8 0 0x4d25767f9dce13f5
+random.31x8 15 0x9e241e66e1807e04
+random.33x8 9 0x65e11a947d523e26
+random.9216x8 2275 0xfca88c2992697cd0
+random.32773x8 11787 0xac9c8f33bf15c134
+random.1x9 0 0x4d25767f9dce13f5
+random.31x9 10 0x01ff5582b2d1f2a5
+random.33x9 8 0x13d199d18c91a475
+random.9216x9 3595 0x412446ca3d907666
+random.32773x9 12527 0x1d107f49ded86b22
+random.1x64 1 0xad2aca7747985764
+random.31x64 26 0x9b6dd1c52788ce8a
+random.33x64 30 0x04c3bf07393def59
+random.9216x64 8385 0x31bcd16da2674eec
+random.32773x64 28943 0x5195778bc1c40583
+random.1x257 1 0xed202287f403d086
+random.31x257 31 0xf1c01c22cc258e65
+random.33x257 33 0x6aa99f4cdda98cdb
+random.9216x257 9158 0xc62bf81325afcbe5
+random.32773x257 32669 0x4de060e98bd14fb9
+threshold.20000x256 19490 0x82354c6d66fc2c32
+threshold.pairs300 170 0x1ea569a63278bac5

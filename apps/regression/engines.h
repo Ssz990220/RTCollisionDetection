@@ -1,8 +1,6 @@
 #pragma once
-// How the regression app runs a check: through the public CollisionChecker (Wave 2 e), or through the test-support
-// ReferenceBatchRunner + a backend factory (lets the Wave 2 backend agents run the goldens before the detector core
-// exists, and cross-checks the core afterwards). Which engines exist depends on what is implemented in this build
-// (RTCD_HAVE_* definitions from rtcd_new_stack_definitions, tests/support/CMakeLists.txt).
+// How the regression app runs a check: through the public CollisionChecker, or through the test-support
+// ReferenceBatchRunner + a backend factory (runs a backend without the detector core; cross-checks the core).
 
 #include <rtcd/config.h>
 #include <rtcd/context.h>
@@ -26,10 +24,6 @@ namespace rtcd::regression {
         virtual const CheckerConfig& resolvedConfig() const = 0;
     };
 
-    bool checkerEngineAvailable();
-    bool referenceEngineAvailable(Mode mode);
-
-    // Both throw UnsupportedError when the engine is not available in this build.
     std::unique_ptr<Engine> makeCheckerEngine(std::shared_ptr<Context> ctx, const CheckerConfig& config,
         std::shared_ptr<const RobotModel> robot, std::shared_ptr<const Scene> scene);
     std::unique_ptr<Engine> makeReferenceEngine(std::shared_ptr<Context> ctx, const CheckerConfig& config,

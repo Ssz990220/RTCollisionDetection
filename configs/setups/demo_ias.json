@@ -1,0 +1,6 @@
+{
+  "checker": { "mode": "mesh", "streams": 4, "max_batch_size": 1024, "max_items_per_check": 4096,
+               "obb_culling": true, "mesh": { "link_gas_build": "fast_trace_compact" } },
+  "scene": "../scenes/shelf_dense.json",
+  "robot": "../robots/panda.json"
+}

@@ -1,8 +1,0 @@
-{
-  "checker": { "mode": "quadratic_curve", "streams": 4, "max_batch_size": 128, "max_items_per_check": 4096,
-               "obb_culling": false,
-               "curve": { "trajectory_points": 16, "control_points": 8, "gas_build": "fast_build",
-                          "spline_weights_dir": "../../../configs/spline_weights" } },
-  "scene": "../../../configs/scenes/shelf_dense.json",
-  "robot": "../../../configs/robots/panda.json"
-}

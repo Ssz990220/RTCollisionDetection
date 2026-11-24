@@ -1,4 +1,4 @@
-# CMake helpers for the new tree (include/rtcd, src/, apps/, tests/). The old stack under RTCD/ does not use them.
+# CMake helpers of the tree (include/rtcd, src/, apps/, tests/).
 #
 #   rtcd_register_new_target(<target>...)
 #       Adds targets to AllNew (top-level CMakeLists.txt). Every helper below registers what it creates; call it
@@ -14,14 +14,14 @@
 #       (non-identifier characters of <name> become '_'), declared in the generated header
 #       <<target>_embedded.h> on the PUBLIC include path of <target>. IR sources see ${PROJECT_SOURCE_DIR}/include,
 #       their own directory and OptiX; INCLUDE_DIRS / LINK add more (LINK only for include paths/definitions: an
-#       OptiX IR object is never linked). Compile options follow the old stack's cuda_compile_and_embed
-#       (cmake/CUDA_Macros.cmake): -lineinfo, fast math, relocatable device code; -G in Debug.
+#       OptiX IR object is never linked). Compile options: -lineinfo, fast math, relocatable device code; -G in
+#       Debug (those of the removed old stack's cuda_compile_and_embed).
 #       Compile-time variants (e.g. curve degree) belong in the .cu as templates / explicit instantiations.
 #
 #   rtcd_add_new_test(<name> LABEL new_unit|new_gpu SOURCES <src>... [LIBS <target>...] [ARGS <arg>...])
 #       GoogleTest executable in bin/Tests/new, registered with ctest under LABEL (new_unit: no GPU needed;
-#       new_gpu: needs a GPU). Runs with the repository root as working directory (data/ is reachable as ./data).
-#       The old stack's golden tests keep the label `regression`.
+#       new_gpu: needs a GPU). Runs with the repository root as working directory (reference data in ./tests/data).
+#       The golden regression entries (tests/apps) carry the label `regression` in addition.
 #
 #   rtcd_add_app(<name> SOURCES <src>... [LIBS <target>...])
 #       Executable in bin/apps.

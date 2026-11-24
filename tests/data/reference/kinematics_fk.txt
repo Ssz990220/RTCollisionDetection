@@ -1,0 +1,10 @@
+# Outputs of the old FK kernels (RTCD/Robot/robot.cu, pandas.h masks), written by
+# tests/robot/test_kinematics_kernels_vs_old.cpp (RTCD_WRITE_REFERENCE). <key> <bytes> <FNV-1a 64 of the bytes>.
+# Inputs: the 4096 regression poses (tests/data/motions/Panda4096.bin) and the first 4096 regression KNN
+# trajectories with 16 points; OBB templates fk_reference::obbTemplates(7) / (11) (tests/robot/fk_reference_cases.h).
+link_poses 1572864 0xa1b18526f9d7bf48
+link_poses_and_obbs.poses 1572864 0xa1b18526f9d7bf48
+link_poses_and_obbs.obbs 1966080 0x1a0d534f1f701b66
+transform_obbs 1966080 0x73a597378ae8e033
+trajectory_link_poses 25165824 0xb9b7680a4f31ac07
+trajectory_link_poses_50x81 1555200 0xdee2509a0dcce1c7

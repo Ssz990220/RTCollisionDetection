@@ -5,9 +5,12 @@
 #include <rtcd/errors.h>
 #include <rtcd/json_config.h>
 
+#include <support/reference.h>
+
 #include <gtest/gtest.h>
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstring>
@@ -223,26 +226,33 @@ TEST(JsonConfigs, CheckerQuadAndItsSplineWeights) {
     EXPECT_EQ(n, 8u * 16u);
 }
 
-TEST(JsonConfigs, SplineWeightsCopyIsComplete) {
-    // configs/spline_weights is a copy of RTCD/data/weights (identical files).
-    const fs::path oldDir = repo() / "RTCD" / "data" / "weights";
+namespace {
+    // text content with CR removed (git may check text files out with CRLF line ends)
+    std::string slurpLf(const fs::path& p) {
+        std::string s = slurp(p);
+        std::erase(s, '\r');
+        return s;
+    }
+} // namespace
+
+// configs/spline_weights equals the stored manifest (tests/data/reference/spline_weights.txt: every file of the old
+// stack's RTCD/data/weights, relative path, bytes and FNV-1a of the content with CR removed).
+TEST(JsonConfigs, SplineWeightsMatchTheStoredManifest) {
+    const auto ref        = rtcd::support::ReferenceFile::load(rtcd::support::referenceDir() / "spline_weights.txt");
     const fs::path newDir = configs() / "spline_weights";
     std::size_t files     = 0;
-    for (const auto& e : fs::recursive_directory_iterator(oldDir)) {
+    for (const auto& e : fs::recursive_directory_iterator(newDir)) {
         if (!e.is_regular_file()) {
             continue;
         }
-        const fs::path rel = fs::relative(e.path(), oldDir);
-        ASSERT_TRUE(fs::exists(newDir / rel)) << rel;
-        EXPECT_EQ(slurp(e.path()), slurp(newDir / rel)) << rel;
+        const std::string rel = fs::relative(e.path(), newDir).generic_string();
+        ASSERT_TRUE(ref.has(rel)) << rel << " is not in the manifest";
+        const std::string text = slurpLf(e.path());
+        EXPECT_EQ(text.size(), ref.integer(rel, 0)) << rel;
+        EXPECT_EQ(rtcd::support::fnv1a(text.data(), text.size()), ref.hash(rel, 1)) << rel;
         ++files;
     }
-    EXPECT_GT(files, 0u);
-    for (const auto& e : fs::recursive_directory_iterator(newDir)) {
-        if (e.is_regular_file()) {
-            EXPECT_TRUE(fs::exists(oldDir / fs::relative(e.path(), newDir))) << e.path();
-        }
-    }
+    EXPECT_EQ(files, ref.keys().size()) << "every file of the manifest exists";
 }
 
 namespace {

@@ -1,8 +1,10 @@
-// new_unit: host utilities of rtcd_testsupport (support/*.h). Runs from the repository root (data/ junction).
+// new_unit: host utilities of rtcd_testsupport (support/*.h). Runs from the repository root (reference data in
+// tests/data).
 #include <support/golden.h>
 #include <support/inputs.h>
 #include <support/options.h>
 #include <support/paths.h>
+#include <support/reference.h>
 #include <support/timing.h>
 
 #include <rtcd/errors.h>
@@ -29,7 +31,11 @@ namespace {
 
 TEST(Paths, FindsRepoRootAndData) {
     const fs::path root = findRepoRoot();
-    EXPECT_TRUE(fs::is_directory(root / "data"));
+    EXPECT_TRUE(fs::is_directory(root / "tests" / "data"));
+    EXPECT_TRUE(fs::is_directory(root / "configs"));
+    if (!getEnv("RTCD_DATA_DIR")) {
+        EXPECT_EQ(fs::weakly_canonical(dataDir()), fs::weakly_canonical(root / "tests" / "data"));
+    }
     EXPECT_TRUE(fs::is_directory(dataDir() / "CCTest"));
     EXPECT_EQ(dataDir(fs::path("x/y")), fs::absolute("x/y"));
     EXPECT_FALSE(executableDir().empty());
@@ -93,6 +99,54 @@ TEST(Inputs, CurveRegressionInputsShapeAndEndpoints) {
 TEST(Inputs, BenchmarkPools) {
     EXPECT_EQ(benchmarkPosePool(motions()).size(), 8192u * 7u);
     EXPECT_EQ(benchmarkTrajectoryPool(motions(), 8).size(), 8192u * 4u * 8u * 7u);
+}
+
+// The inputs equal what the old harness computed from the same cache files (stored hashes of the old randomMotions /
+// genCSpaceKNNTraj outputs, tests/data/reference/inputs.txt): the trajectory arithmetic is byte-identical.
+TEST(Inputs, MatchTheStoredOldHarness) {
+    const auto ref = ReferenceFile::load(referenceDir() / "inputs.txt");
+    for (std::uint32_t pts : {1u, 16u, 8u, 32u}) {
+        const std::string key = "regression." + std::to_string(pts);
+        const std::vector<float> in = regressionInputs(motions(), pts);
+        EXPECT_EQ(in.size(), ref.integer(key, 0)) << key;
+        EXPECT_EQ(hex64(fnv1a(in)), hex64(ref.hash(key, 1))) << key;
+    }
+    const std::vector<float> pool = benchmarkPosePool(motions());
+    EXPECT_EQ(pool.size(), ref.integer("pool.poses", 0));
+    EXPECT_EQ(hex64(fnv1a(pool)), hex64(ref.hash("pool.poses", 1)));
+    const std::vector<std::int32_t> idx = loadKnnIndices(motions(), "Panda", "1111111", 8192, 4);
+    EXPECT_EQ(idx.size(), ref.integer("pool.knn_idx", 0));
+    EXPECT_EQ(hex64(fnv1a(idx)), hex64(ref.hash("pool.knn_idx", 1)));
+}
+
+TEST(Reference, Fnv1aAndFileFormat) {
+    EXPECT_EQ(fnv1a("", 0), 0xcbf29ce484222325ull);
+    EXPECT_EQ(fnv1a("a", 1), 0xaf63dc4c8601ec8cull); // published FNV-1a 64 test vector
+    EXPECT_EQ(fnv1a("foobar", 6), 0x85944171f73967e8ull);
+    EXPECT_EQ(hexFloat(1.0f), "0x3f800000");
+    EXPECT_EQ(parseHexFloat("0xbf800000"), -1.0f);
+    EXPECT_EQ(parseHex64(hex64(0x0123456789abcdefull)), 0x0123456789abcdefull);
+    EXPECT_THROW(parseHex64("12"), InvalidArgument);
+    const fs::path f = tempDir() / "ref.txt";
+    ReferenceWriter w(f, "two\nlines");
+    w.putInt("a", 3).putHash("b", 4, 0xffull).putFloats("c", std::vector<float>{0.5f, -2.0f});
+    const std::uint32_t ints[] = {1, 2};
+    w.putInts("d", ints);
+    w.save();
+    const ReferenceFile r = ReferenceFile::load(f);
+    EXPECT_EQ(r.keys(), (std::vector<std::string>{"a", "b", "c", "d"}));
+    EXPECT_EQ(r.integer("a"), 3u);
+    EXPECT_EQ(r.integer("b", 0), 4u);
+    EXPECT_EQ(r.hash("b", 1), 0xffull);
+    EXPECT_EQ(r.floats("c"), (std::vector<float>{0.5f, -2.0f}));
+    EXPECT_EQ(r.integers("d"), (std::vector<std::uint64_t>{1, 2}));
+    EXPECT_THROW(r.values("zz"), IoError);
+    {
+        std::ofstream o(tempDir() / "dup.txt");
+        o << "k 1\nk 2\n";
+    }
+    EXPECT_THROW(ReferenceFile::load(tempDir() / "dup.txt"), IoError);
+    EXPECT_THROW(ReferenceFile::load(tempDir() / "missing.txt"), IoError);
 }
 
 TEST(Inputs, MissingOrMalformedCacheThrowsIoError) {
