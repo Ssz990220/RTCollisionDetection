@@ -418,7 +418,10 @@ Measured on Windows, RTX 5080, Release build:
   reproduces the culling-off flags for linear and quadratic curves.
 - **Small batches are bound by host-side driver overhead on Windows.** Each CUDA / OptiX host call costs on the
   order of 5-30 us in the driver on this machine, so at small batch sizes the time per check is dominated by the
-  number of host calls, not by GPU work.
+  number of host calls, not by GPU work. In `ray` mode `graph_prepare` (default on) replays each batch's zeroing,
+  staging copy and kernels as one CUDA graph launch (BM_RAY about 24% faster at N <= 16, 4-10% at larger N). OptiX
+  calls (`optixLaunch`, `optixAccelBuild`) cannot be captured into CUDA graphs on OptiX 9.1, so `mesh` and the curve
+  modes, which build an acceleration structure per batch, do not use it.
 - Trajectory and control point counts are fixed per checker; quadratic / cubic curves need the weight file
   `<spline_weights_dir>/<quad|cubic>/<normal|repeated>/<control>_<trajectory>.txt`, and
   `control_points * trajectory_points <= 512`. `configs/spline_weights` holds the existing files; there are none
