@@ -6,6 +6,8 @@ add_library(rtcd_core STATIC
   optix_function_table.cpp  # alone in its object file on purpose (see the file)
   device_buffer.cpp
   context.cpp
+  algorithms.cu             # internal/algorithms.h (compiled without fast math, like the old BBCollisionDetection.cu)
+  accel.cpp                 # internal/accel.h
 )
 target_include_directories(rtcd_core
   PUBLIC  ${PROJECT_SOURCE_DIR}/include

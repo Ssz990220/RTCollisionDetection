@@ -18,3 +18,20 @@ rtcd_add_new_test(test_core_unit LABEL new_unit
 rtcd_add_new_test(test_core_gpu LABEL new_gpu
   SOURCES test_core_gpu.cpp fault_kernels.cu
   LIBS rtcd_core)
+
+# internal/algorithms.h against host references.
+rtcd_add_new_test(test_core_algorithms LABEL new_gpu
+  SOURCES test_core_algorithms.cpp
+  LIBS rtcd_core)
+
+# internal/accel.h: GAS / IAS builds, verified by tracing rays with a small embedded OptiX program.
+rtcd_add_optix_ir(rtcd_core_test_ir SOURCES trace_program.cu)
+rtcd_add_new_test(test_core_accel LABEL new_gpu
+  SOURCES test_core_accel.cpp trace_params.h
+  LIBS rtcd_core rtcd_core_test_ir)
+
+# Parity with the OLD STACK (links rtcd_legacy_kernels; delete with the old stack): obbOverlapCounts vs
+# RTCD::BBCDRobotMask, bit-identical counts.
+rtcd_add_new_test(test_core_legacy_parity LABEL new_gpu
+  SOURCES test_core_legacy_parity.cpp
+  LIBS rtcd_core rtcd_legacy_kernels)
