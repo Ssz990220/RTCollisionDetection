@@ -1,0 +1,27 @@
+{
+  "mode": "linear_curve",
+  "streams": 4,
+  "host_dispatch": "thread_per_stream",
+  "max_batch_size": 128,
+  "max_items_per_check": 4096,
+  "obb_culling": "auto",
+  "collapse_root_link_obb": true,
+  "scene_edges": "auto",
+  "verbosity": "warning",
+  "optix": {
+    "opt_level": "default",
+    "debug_level": "default",
+    "max_register_count": 50,
+    "exceptions": [],
+    "max_trace_depth": 2,
+    "print_pipeline_log": false
+  },
+  "curve": {
+    "trajectory_points": 16,
+    "end_points": "normal",
+    "gas_build": "fast_build",
+    "refit": "auto",
+    "auto_refit_max_batches": "auto",
+    "geometry_flags": "auto"
+  }
+}

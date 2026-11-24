@@ -1,0 +1,23 @@
+{
+  "mode": "ray",
+  "streams": 4,
+  "host_dispatch": "thread_per_stream",
+  "max_batch_size": 128,
+  "max_items_per_check": 4096,
+  "obb_culling": "auto",
+  "collapse_root_link_obb": true,
+  "verbosity": "warning",
+  "optix": {
+    "opt_level": "default",
+    "debug_level": "default",
+    "max_register_count": 50,
+    "exceptions": [],
+    "max_trace_depth": 2,
+    "print_pipeline_log": false
+  },
+  "ray": {
+    "launch_width_cap": 262144,
+    "skip_hit_items": true,
+    "hit_mode": "closest_hit"
+  }
+}

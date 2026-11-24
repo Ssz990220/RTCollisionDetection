@@ -1,0 +1,9 @@
+{
+  "robot": {
+    "description": "../../models/franka_description/panda.urdf",
+    "geometry": {
+      "mesh": { "dir": "../../models/franka_description/meshes/Simplified/watertight", "format": "obj", "source": "visual" },
+      "spheres": { "dir": "../../models/franka_description/spheres", "format": "xyzr" }
+    }
+  }
+}
