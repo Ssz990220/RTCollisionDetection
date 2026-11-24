@@ -12,6 +12,9 @@
 add_library(rtcd_detector STATIC
   detector_core.h
   detector_core.cpp
+  detector_kernels.h
+  detector_kernels.cu
+  phase_trace.h
   optix_pipeline.h
   optix_pipeline.cpp
   stream_workers.h

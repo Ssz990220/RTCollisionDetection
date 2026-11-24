@@ -34,13 +34,22 @@ b % `streams`. The detector core runs one loop with no mode branch in it (`inclu
 
 ```
 backend.beginCheck(info)                                   once per check, host only
-for each batch b on stream s (in batch order per stream; one worker thread per stream with thread_per_stream):
-    core: zero s's hit counters, copy the batch's items into s's staging buffer
+for each batch b on stream s (in batch order per stream; one worker thread per stream with thread_per_stream,
+                              the calling thread for a single-batch check):
+    core: zero the hit counters (s's own, or the result range itself when s's previous batch had the same target)
+    core: items are read in place when packed (strided input: copy into s's staging buffer)
     plan = backend.prepare(streams[s], batch)              kinematics, OBB culling, AS build / refit, params
     core: upload plan.params if they changed, optixLaunch(...) unless plan.launch == false
-    core: copy the hit counters into the result at batch.firstItem
-core: synchronize the checker's streams; flag = hit count > 0
+    core: copy the hit counters into the result at batch.firstItem, unless counted there directly
+core: synchronize the streams that ran batches; flag = hit count > 0
 ```
+Host checks (`check(HostItems)`, `mapped_host_transfer` default on) pack the items into a pinned host buffer that
+the GPU reads through its mapping and get the counters back through a second pinned buffer, written by a small
+copy kernel: no copy-engine transfer, which costs 20-60 us of latency per small copy on Windows.
+Each check first waits for pending work on the legacy default stream (query, then synchronize if not ready); with
+blocking streams that work would be waited for on the device anyway; measured on Windows: ~15 us per check saved
+when a pageable upload precedes the check. This is also why the Context's pool streams must stay blocking: a
+caller's pageable `cudaMemcpy` of the items on the default stream must be ordered before the check reads them.
 
 Seams sit only where calls are rare: the virtual `Backend` calls are once per checker, per check or per batch.
 Kernel bodies and OptiX programs stay inside their own `.cu` translation unit; where a kernel needs a compile-time
@@ -58,8 +67,8 @@ The `Backend` contract, in short (full text in `backend.h`):
 CUDA graph replay (`graph_prepare`, default on, since 2026-11-24): a backend may report
 `prepareCapturable(itemCount)` -- its `prepare()` issues only plain CUDA work and its plan / params depend only on
 (stream, item count). For such batches the core captures "zero hit counts, staging copy, `prepare()`" once per
-(stream, item count) into a CUDA graph and afterwards issues it with one `cudaGraphLaunch` (staging-copy source
-re-pointed per batch, at most 8 graphs per stream); `optixLaunch` and the result copy stay direct calls. Only the
+(stream, item count, hit-count address) into a CUDA graph and afterwards issues it with one `cudaGraphLaunch`
+(the staging copy is the core's copy kernel, re-pointed per batch; at most 8 graphs per stream); `optixLaunch` and the result copy stay direct calls. Only the
 ray backend reports it: OptiX calls cannot be captured (an `optixLaunch` / `optixAccelBuild` inside a capture is
 dropped from the graph and corrupts the OptiX context, measured with `tests/experiments/graph_capture`), and mesh /
 curves build an acceleration structure in every `prepare()`.

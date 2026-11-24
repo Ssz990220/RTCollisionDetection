@@ -398,7 +398,10 @@ namespace rtcd::internal {
                 const std::uint32_t n     = (std::min)(B, itemCount - first); // windows.h (optix_stubs.h) min macro
                 DeviceBuffer& stage       = d.staging[s];
                 DeviceBuffer& hit         = d.hits[s];
-                // 7.1 zero the stream's hit counters, 7.2 staging copy (rtcd/backend.h, design doc section 4)
+                // 7.1 zero the stream's hit counters, 7.2 staging copy (rtcd/backend.h, design doc section 4). The
+                // reference keeps the most conservative form the contract allows (staging buffer and per-stream
+                // counters for every batch); the core may read items in place and count into the result directly,
+                // so backends must not rely on either address being stable.
                 hit.memsetAsync(0, std::size_t(n) * sizeof(std::uint32_t), sc.stream);
                 stage.copyFromAsync(d.input.ptr() + std::uint64_t(first) * d.floatsPerItem * sizeof(float),
                     std::size_t(n) * d.floatsPerItem * sizeof(float), sc.stream);

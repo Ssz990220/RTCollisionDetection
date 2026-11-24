@@ -7,7 +7,7 @@
 // One executable serves every scene (the old stack built one binary per scene: benchmarkShelf / ...ShelfSimple /
 // ...DenseShelf, BM_CURVE_Shelf / ...ShelfSimple / ...DenseShelf). Benchmark names, template arguments and argument
 // ranges are exactly the old ones, so the JSON written with --benchmark_out=<file> is read unchanged by
-// scripts/Benchmark/plots/** (see benchmark.sh / benchmark.bat for the output file names).
+// scripts/Benchmark/plots/plot_benchmarks.py (see benchmark.sh / benchmark.bat for the output file names).
 //
 // App options (removed from argv before benchmark::Initialize; all other arguments go to Google Benchmark):
 //   --scene <name | scene.json>  a name is configs/scenes/<name>.json: shelf (default, old SHELF build),

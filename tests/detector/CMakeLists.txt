@@ -26,3 +26,19 @@ target_compile_definitions(test_detector_facade PRIVATE NOMINMAX)
 rtcd_add_new_test(test_graph_prepare LABEL new_gpu
   SOURCES test_graph_prepare.cpp
   LIBS rtcd rtcd_testsupport rtcd_json)
+
+# The relaxed BatchView address rules (items in place, counting into the result range, single-batch checks on the
+# calling thread) with the real backends of all four modes, end to end against the goldens.
+# The golden regression with CheckerConfig::mapped_host_transfer off (the defaults run it on): host items uploaded
+# into a device input buffer and the counters downloaded. Mesh (items read in place) and ray (graph staging copy).
+foreach(mode ias ray)
+  add_test(NAME rtcd_regression_${mode}_copy_transfer
+    COMMAND rtcd_regression --setup ${PROJECT_SOURCE_DIR}/configs/setups/regression_${mode}.json
+            --override mapped_host_transfer=false
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+  set_tests_properties(rtcd_regression_${mode}_copy_transfer PROPERTIES LABELS "new_gpu;regression")
+endforeach()
+
+rtcd_add_new_test(test_address_rules LABEL new_gpu
+  SOURCES test_address_rules.cpp
+  LIBS rtcd rtcd_testsupport rtcd_json)

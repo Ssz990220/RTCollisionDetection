@@ -11,7 +11,8 @@
 // Nsight Systems.)
 // Note: with Google Benchmark 1.10 a per-benchmark MinWarmUpTime() only takes effect together with MinTime();
 // without it the --benchmark_min_warmup_time flag (default 0) applies. That holds for the old executables alike,
-// and the option is kept because it is part of the benchmark names the plotting scripts parse.
+// and the option is kept because it is part of the old benchmark names (scripts/Benchmark/plots/plot_benchmarks.py
+// accepts names with and without the /min_warmup_time: part).
 #include "bench_common.h"
 
 #include <benchmark/benchmark.h>

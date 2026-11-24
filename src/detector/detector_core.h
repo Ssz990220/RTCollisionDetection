@@ -17,6 +17,8 @@
 #include <rtcd/context.h>
 #include <rtcd/device_buffer.h>
 
+#include "detector/phase_trace.h"
+
 #include <array>
 #include <atomic>
 #include <cstdint>
@@ -64,7 +66,8 @@ namespace rtcd::detail {
         ItemLayout itemLayout() const noexcept { return layout_; }
         Backend& backend() noexcept { return *backend_; }
         std::span<const StreamContext> streams() const noexcept { return streamCtx_; }
-        // Thread that runs the batches of stream s: a worker (ThreadPerStream) or the caller (SingleThread, id()).
+        // Thread that runs the multi-batch checks' batches of stream s: a worker (ThreadPerStream) or the caller
+        // (SingleThread, id()). A single-batch check always runs on the calling thread.
         std::thread::id workerThreadId(std::uint32_t s) const;
 
         // collides.size() >= items.count; hitCounts empty or >= items.count.
@@ -73,14 +76,20 @@ namespace rtcd::detail {
         void warmup();
         CheckStats lastStats() const noexcept { return stats_; }
 
+        // Diagnostic host-time breakdown (phase_trace.h; tests/experiments/host_breakdown): null (default) = off.
+        // The trace must have been reset() for this checker's stream count and outlive the checks it records.
+        void setPhaseTrace(PhaseTrace* trace) noexcept { trace_ = trace; }
+
         // Capacity / layout checks of a host item view (count > 0), as checkHost does first. CapacityError,
         // InvalidArgument.
         void validateHostItems(const HostItems& items) const;
 
     private:
-        // A captured "zero hits + staging copy + prepare()" sequence of one stream for one batch item count.
+        // A captured "zero hits + staging copy + prepare()" sequence of one stream for one (batch item count,
+        // hit-count address): the memset node and the captured params hold that address.
         struct PrepareGraph {
             std::uint32_t itemCount = 0;
+            DevicePtr hits          = 0;       // BatchView::hitCounts at capture (memset node, params)
             CUgraph_st* graph       = nullptr; // kept: owns the staging-copy node handle
             CUgraphExec_st* exec    = nullptr;
             CUgraphNode_st* stagingNode = nullptr;
@@ -95,8 +104,8 @@ namespace rtcd::detail {
         static constexpr std::size_t kMaxPrepareGraphs = 8;
 
         struct StreamState {
-            DeviceBuffer staging; // maxBatchSize * floatsPerItem floats (BatchView::items)
-            DeviceBuffer hits;    // maxBatchSize uint32 (BatchView::hitCounts)
+            DeviceBuffer staging; // maxBatchSize * floatsPerItem floats (BatchView::items of graph / strided batches)
+            DeviceBuffer hits;    // maxBatchSize uint32 (BatchView::hitCounts unless counted into the result)
             DeviceBuffer params;  // kMaxLaunchParamsBytes
             // Upload cache (old uploadLaunchParams memcmp cache): bytes the params buffer holds.
             std::array<unsigned char, kMaxLaunchParamsBytes> uploaded{};
@@ -104,6 +113,7 @@ namespace rtcd::detail {
             bool uploadedValid          = false;
             // Counters of the running check.
             std::uint32_t batches = 0, launches = 0, hostSyncs = 0, paramUploads = 0;
+            DevicePtr lastTarget = 0; // result address of this stream's previous batch (direct hit counters)
             std::vector<std::unique_ptr<PrepareGraph>> graphs; // graph-prepare experiment only
         };
         // Where the batches read their items: item i starts at base + i * strideBytes.
@@ -123,7 +133,14 @@ namespace rtcd::detail {
         LaunchPlan graphPrepare(std::uint32_t s, const BatchView& view, DevicePtr src, std::size_t stagingBytes);
         void destroyPrepareGraphs() noexcept;
         void drainStreams() noexcept;
-        void synchronizeStreams(); // checked; synchronizes every stream even if one fails, throws the first error
+        // Checked; synchronizes streams [0, used) (those that ran batches of the check) even if one fails, throws
+        // the first error.
+        void synchronizeStreams(std::uint32_t used);
+        void mark(std::size_t slot, Phase p) const noexcept {
+            if (trace_ != nullptr) {
+                trace_->mark(slot, p);
+            }
+        }
 
         std::shared_ptr<Context> ctx_;
         CheckerConfig cfg_;
@@ -137,14 +154,17 @@ namespace rtcd::detail {
         std::unique_ptr<Backend> backend_;
         std::unique_ptr<OptixProgramPipeline> pipeline_;
         std::vector<StreamState> streams_;
-        DeviceBuffer input_;      // maxItemsPerCheck packed items (host path)
-        DeviceBuffer result_;     // maxItemsPerCheck uint32 (host path)
-        PinnedHostBuffer download_; // maxItemsPerCheck uint32
+        PinnedHostBuffer upload_;   // maxItemsPerCheck packed items (host path, mappedHostTransfer; read in place)
+        DeviceBuffer input_, result_; // host path without mappedHostTransfer: device items / counters
+        DevicePtr uploadDev_ = 0, downloadDev_ = 0; // device addresses of the two pinned buffers
+        PinnedHostBuffer download_; // maxItemsPerCheck uint32 (host path; mappedHostTransfer: written in place)
+        bool resultsOnHost_ = false; // the running check writes its counters into download_ (checkHost)
         std::vector<float> warmupItems_;
         CheckStats stats_;
         std::atomic<bool> abort_{false};
         std::mutex errorMutex_;
         std::exception_ptr firstError_;
+        PhaseTrace* trace_ = nullptr; // diagnostic, not owned
         std::unique_ptr<StreamWorkers> workers_; // last: destroyed (joined) first
     };
 

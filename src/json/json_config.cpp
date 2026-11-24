@@ -555,7 +555,8 @@ namespace rtcd {
         void readChecker(const Json& v, const Source& src, const std::string& path, CheckerConfig& c) {
             const Object obj(v, src, path,
                 {"mode", "streams", "host_dispatch", "max_batch_size", "max_items_per_check", "obb_culling",
-                    "collapse_root_link_obb", "scene_edges", "verbosity", "graph_prepare", "optix", "mesh", "ray", "curve"});
+                    "collapse_root_link_obb", "scene_edges", "verbosity", "graph_prepare", "mapped_host_transfer",
+                    "optix", "mesh", "ray", "curve"});
             if (const Json* x = obj.find("mode")) {
                 c.mode = readEnum(*x, src, obj.at("mode"), kModes);
             }
@@ -591,6 +592,9 @@ namespace rtcd {
             }
             if (const Json* x = obj.find("graph_prepare")) {
                 c.graphPrepare = readBool(*x, src, obj.at("graph_prepare"));
+            }
+            if (const Json* x = obj.find("mapped_host_transfer")) {
+                c.mappedHostTransfer = readBool(*x, src, obj.at("mapped_host_transfer"));
             }
             if (const Json* x = obj.find("optix")) {
                 readOptix(*x, src, obj.at("optix"), c.optix);
@@ -778,6 +782,7 @@ namespace rtcd {
             j["scene_edges"]            = c.sceneEdges ? enumJson(*c.sceneEdges, kEdgeSets) : Json("auto");
             j["verbosity"]              = enumJson(c.verbosity, kLogLevels);
             j["graph_prepare"]          = c.graphPrepare;
+            j["mapped_host_transfer"]   = c.mappedHostTransfer;
 
             Json o;
             if (c.optix.optLevel == OptixOptions::OptLevel::Default) {

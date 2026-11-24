@@ -158,7 +158,9 @@ namespace rtcd {
         ThreadPerStream, // "thread_per_stream": one persistent worker thread per stream issues that stream's
                          //                  batches in order (old USE_MULTI_THREADING, used by the regression and
                          //                  the benchmarks). Lets a host sync on one stream (IAS compaction, curve
-                         //                  OBB) overlap work issued on the others.
+                         //                  OBB) overlap work issued on the others. A check with a single batch has
+                         //                  nothing to overlap and is issued on the calling thread (no worker
+                         //                  wake-up / join: 6-18 us per check measured on Windows).
     };
 
     struct CheckerConfig {
@@ -186,6 +188,12 @@ namespace rtcd {
         // prepare) as one CUDA graph launch per batch; applies only to batches for which the backend reports its
         // prepare as capturable (Backend::prepareCapturable); never changes results. Added 2026-11-24.
         bool graphPrepare = true;
+        // [runtime] "mapped_host_transfer": host check() lets the GPU read the packed items from, and write the
+        // counters to, mapped pinned host memory instead of using copy-engine uploads / downloads; never changes
+        // results; checkDevice() is unaffected. false = synchronous upload into a device input buffer and a
+        // download of the counters. Measured on Windows 11 / RTX 5080: host check N=1 ray 34.7 vs 72.0 us, neutral
+        // at N=1024; not yet measured on Linux. Added 2026-11-24.
+        bool mappedHostTransfer = true;
         OptixOptions optix = OptixOptions::buildDefault();     // "optix"
         MeshOptions mesh;                                      // "mesh"   (read only when mode == Mesh)
         RayOptions ray;                                        // "ray"    (read only when mode == Ray)
