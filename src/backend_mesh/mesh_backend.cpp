@@ -26,7 +26,14 @@
 //     else IAS BUILD over the survivors, primToItem = compacted map.
 //   * itemCount < mesh.compactionMinPoses ("masked path", no host round trip): transforms written with
 //     visibility mask 0 for culled instances, IAS BUILD over all itemCount * numLinks instances, primToItem =
-//     template map. Always launches.
+//     template map. Always launches. Since G3 (2026-11-24) the overlap test and the instance write are one kernel
+//     (mesh_detail::writeInstanceTransformsAndOverlapMasks, the SAT code of internal::obbOverlapCounts shared via
+//     src/core/obb_sat.cuh), so the masked path issues no count buffer.
+//
+// Backend::prepareSplit (G3): below compactionMinPoses items (masked path, and the OBB-off path) prepare() =
+// prepareCompute() (FK + link OBBs + instance kernel: plain CUDA work, graph-replayed by the core with
+// graph_prepare) + prepareFinish() (IAS build / refit, params, plan; every params field is set there, from the
+// arguments, so a replay that skips prepareCompute()'s host code changes nothing).
 #include <rtcd/backend.h>
 #include <rtcd/device_buffer.h>
 #include <rtcd/errors.h>
@@ -99,11 +106,13 @@ namespace rtcd {
             bool synchronizesHost(std::uint32_t itemCount) const noexcept override {
                 return obbCulling_ && itemCount >= compactionMinPoses_;
             }
-            // Split (G3): every path without a host sync, i.e. the masked path (OBB culling on, itemCount <
-            // compactionMinPoses) and the OBB-off path. prepareCompute = FK + link OBBs + instance transforms /
-            // masks (kernels only); prepareFinish = IAS build / refit + params + plan.
+            // Split (G3) below mesh.compactionMinPoses items: the masked path (OBB culling on) and the OBB-off path.
+            // prepareCompute = FK + link OBBs + instance transforms / masks (kernels only); prepareFinish = IAS build
+            // / refit + params + plan. Measured (RTX 5080 / Windows, graph_prepare on vs off): -1.6 to -4.8 us per
+            // batch below 128 items; OBB off at 1024 items +1.9% (the graph's staging copy instead of reading the
+            // items in place), so larger OBB-off batches stay unsplit.
             bool prepareSplit(std::uint32_t itemCount) const noexcept override {
-                return itemCount >= 1 && itemCount <= maxBatchSize_ && !synchronizesHost(itemCount);
+                return itemCount >= 1 && itemCount <= maxBatchSize_ && itemCount < compactionMinPoses_;
             }
             void prepareCompute(const StreamContext& stream, const BatchView& batch) override;
             LaunchPlan prepareFinish(const StreamContext& stream, const BatchView& batch) override;
@@ -441,7 +450,7 @@ namespace rtcd {
             StreamState& s = checkedState(stream, batch, "prepareCompute");
             if (!prepareSplit(batch.itemCount)) {
                 throw InvalidArgument("MeshBackend::prepareCompute: batch of " + std::to_string(batch.itemCount)
-                                      + " items takes the compaction path (not split)");
+                                      + " items is not split (prepareSplit() is false)");
             }
             computeKernels(s, batch);
         }
@@ -450,7 +459,7 @@ namespace rtcd {
             StreamState& s = checkedState(stream, batch, "prepareFinish");
             if (!prepareSplit(batch.itemCount)) {
                 throw InvalidArgument("MeshBackend::prepareFinish: batch of " + std::to_string(batch.itemCount)
-                                      + " items takes the compaction path (not split)");
+                                      + " items is not split (prepareSplit() is false)");
             }
             return finishSplit(s, batch);
         }
@@ -458,7 +467,8 @@ namespace rtcd {
         LaunchPlan MeshBackend::prepare(const StreamContext& stream, const BatchView& batch) {
             StreamState& s        = checkedState(stream, batch, "prepare");
             const std::uint32_t n = batch.itemCount;
-            if (prepareSplit(n)) {
+            if (!synchronizesHost(n)) {
+                // Masked or OBB-off path (prepareSplit() covers these below compactionMinPoses items).
                 computeKernels(s, batch);
                 return finishSplit(s, batch);
             }
