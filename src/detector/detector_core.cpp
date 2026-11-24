@@ -102,6 +102,13 @@ namespace rtcd::detail {
         backend_.reset(); // before the lease returns the streams and before robot / scene / context references go
     }
 
+    void DetectorCore::setTuning(const Tuning& t) {
+        tuning_ = t;
+        if (workers_) {
+            workers_->setSpin(t.joinSpinUs, t.wakeSpinUs);
+        }
+    }
+
     std::thread::id DetectorCore::workerThreadId(std::uint32_t s) const {
         if (s >= cfg_.numStreams) {
             throw InvalidArgument("DetectorCore::workerThreadId: stream " + str(s) + " >= " + str(cfg_.numStreams));
@@ -180,10 +187,27 @@ namespace rtcd::detail {
         }
         const auto n = static_cast<std::uint32_t>(items.count);
         ctx_->makeCurrent();
+        mark(0, Phase::Entry);
         uploadHostItems(items);
-        run(n, ItemSource{input_.ptr(), layout_.floatsPerItem() * sizeof(float)}, result_.ptr());
-        // Step 9: one download of the n counters into the pinned buffer (the streams are synchronized).
-        result_.download(download_.data(), std::size_t(n) * sizeof(std::uint32_t));
+        mark(0, Phase::Upload);
+        if (tuning_.hostResultsToPinned) {
+            // Each batch copies its counters straight into the pinned buffer on its own stream (D2H, async);
+            // after the streams are synchronized the counts are there, no separate download.
+            resultsOnHost_ = true;
+            try {
+                run(n, ItemSource{input_.ptr(), layout_.floatsPerItem() * sizeof(float)},
+                    static_cast<DevicePtr>(reinterpret_cast<std::uintptr_t>(download_.data())));
+            } catch (...) {
+                resultsOnHost_ = false;
+                throw;
+            }
+            resultsOnHost_ = false;
+        } else {
+            run(n, ItemSource{input_.ptr(), layout_.floatsPerItem() * sizeof(float)}, result_.ptr());
+            // Step 9: one download of the n counters into the pinned buffer (the streams are synchronized).
+            result_.download(download_.data(), std::size_t(n) * sizeof(std::uint32_t));
+        }
+        mark(0, Phase::Download);
         const std::span<const std::uint32_t> counts = download_.as<std::uint32_t>().first(n);
         for (std::uint32_t i = 0; i < n; ++i) {
             collides[i] = counts[i] > 0 ? 1 : 0;
@@ -191,6 +215,7 @@ namespace rtcd::detail {
         if (!hitCounts.empty()) {
             std::copy(counts.begin(), counts.end(), hitCounts.begin());
         }
+        mark(0, Phase::Flags);
     }
 
     void DetectorCore::checkDevice(const DeviceItems& items, DeviceSpan<std::uint32_t> hitCounts) {
@@ -201,6 +226,7 @@ namespace rtcd::detail {
         validateDeviceItems(items, hitCounts);
         const std::size_t stride = items.stride == 0 ? layout_.floatsPerItem() : items.stride;
         ctx_->makeCurrent();
+        mark(0, Phase::Entry);
         run(static_cast<std::uint32_t>(items.count), ItemSource{items.floats, stride * sizeof(float)}, hitCounts.ptr);
     }
 
@@ -238,9 +264,11 @@ namespace rtcd::detail {
 
         // Step 5: per-check policy, calling thread, before any prepare(). Nothing is enqueued yet.
         backend_->beginCheck(CheckInfo{count, nb});
+        mark(0, Phase::BeginCheck);
 
         // Step 6 / 7: dispatch.
-        if (!workers_) {
+        mark(0, Phase::Dispatch);
+        if (!workers_ || (tuning_.inlineSingleBatch && nb == 1)) {
             try {
                 for (std::uint32_t b = 0; b < nb; ++b) {
                     runBatch(b, count, source, results);
@@ -284,8 +312,16 @@ namespace rtcd::detail {
             }
         }
 
+        mark(0, Phase::Joined);
+
         // Step 8: synchronize the checker's streams (not the device).
-        synchronizeStreams();
+        const std::uint32_t used = std::min(S, nb);
+        synchronizeStreams(used);
+        if (trace_ != nullptr && trace_->probeIdleSync) {
+            synchronizeStreams(used);
+            trace_->slots[0].back().phase = Phase::SyncProbe; // the second sync's two marks -> one probe interval
+            trace_->slots[0].erase(trace_->slots[0].end() - 2);
+        }
 
         CheckStats stats;
         stats.items = count;
@@ -296,6 +332,7 @@ namespace rtcd::detail {
             stats.paramUploads += st.paramUploads;
         }
         stats_ = stats;
+        mark(0, Phase::Stats);
     }
 
     void DetectorCore::runBatch(std::uint32_t b, std::uint32_t count, const ItemSource& source, DevicePtr results) {
@@ -308,6 +345,8 @@ namespace rtcd::detail {
         const std::size_t fpi     = layout_.floatsPerItem();
         const std::size_t fpiBytes = fpi * sizeof(float);
 
+        const std::size_t slot = 1 + s;
+        mark(slot, Phase::BatchStart);
         const DevicePtr src = source.base + std::uint64_t(first) * source.strideBytes;
         BatchView view;
         view.batchIndex = b;
@@ -316,29 +355,52 @@ namespace rtcd::detail {
         view.items      = DeviceSpan<const float>{st.staging.ptr(), std::size_t(n) * fpi};
         view.hitCounts  = DeviceSpan<std::uint32_t>{st.hits.ptr(), n};
 
+        // Direct hit counters: the programs count straight into the check's result range (no result copy). Only
+        // when this stream's previous batch had the same target address, so the backend's params (which hold the
+        // hit-count pointer) and graphs stay byte-identical between checks into the same result buffer; a batch
+        // with a new target uses the stream's own buffer + copy, as before.
+        const DevicePtr target = results + std::uint64_t(first) * sizeof(std::uint32_t);
+        const bool directHits  = tuning_.directHits && !resultsOnHost_ && target == st.lastTarget;
+        st.lastTarget          = target;
+        if (directHits) {
+            view.hitCounts = DeviceSpan<std::uint32_t>{target, n};
+        }
+        const bool graph = cfg_.graphPrepare && source.strideBytes == fpiBytes && backend_->prepareCapturable(n);
+        // Direct items: a non-graph batch with packed input reads its items where they are (no staging copy).
+        const bool directItems = tuning_.directItems && !graph && source.strideBytes == fpiBytes;
+        if (directItems) {
+            view.items = DeviceSpan<const float>{src, std::size_t(n) * fpi};
+        }
+
         LaunchPlan plan;
-        if (cfg_.graphPrepare && source.strideBytes == fpiBytes && backend_->prepareCapturable(n)) {
+        if (graph) {
             // 7.1 - 7.3 as one cudaGraphLaunch (CheckerConfig::graphPrepare, Backend::prepareCapturable).
             if (backend_->synchronizesHost(n)) {
                 internalError("backend '" + pipeline_->moduleName() + "': prepareCapturable(" + str(n)
                               + ") and synchronizesHost(" + str(n) + ") are both true");
             }
             plan = graphPrepare(s, view, src, std::size_t(n) * fpiBytes);
+            mark(slot, Phase::GraphLaunch);
         } else {
             // 7.1 zero the batch's hit counters.
-            st.hits.memsetAsync(0, std::size_t(n) * sizeof(std::uint32_t), sc.stream);
+            RTCD_CUDA_CHECK(cudaMemsetAsync(toPtr(view.hitCounts.ptr), 0, std::size_t(n) * sizeof(std::uint32_t), sc.stream));
+            mark(slot, Phase::Zero);
             // 7.2 staging copy of the batch's items (packed in the staging buffer).
-            if (source.strideBytes == fpiBytes) {
+            if (directItems) {
+                // nothing to copy
+            } else if (source.strideBytes == fpiBytes) {
                 st.staging.copyFromAsync(src, std::size_t(n) * fpiBytes, sc.stream);
             } else {
                 RTCD_CUDA_CHECK(cudaMemcpy2DAsync(toPtr(st.staging.ptr()), fpiBytes, toPtr(src), source.strideBytes, fpiBytes,
                     n, cudaMemcpyDeviceToDevice, sc.stream));
             }
+            mark(slot, Phase::Staging);
             // 7.3 mode-specific work.
             if (backend_->synchronizesHost(n)) {
                 ++st.hostSyncs;
             }
             plan = backend_->prepare(sc, view);
+            mark(slot, Phase::Prepare);
         }
 
         // 7.4 params upload (skipped when byte-identical to this stream's last upload) + launch.
@@ -358,14 +420,20 @@ namespace rtcd::detail {
                     ++st.paramUploads;
                 }
             }
+            mark(slot, Phase::Params);
             pipeline_->launch(sc.stream, st.params.ptr(), plan.paramsBytes, plan);
+            mark(slot, Phase::Launch);
             ++st.launches;
         }
 
         // 7.5 result copy at firstItem.
-        RTCD_CUDA_CHECK(cudaMemcpyAsync(toPtr(results + std::uint64_t(first) * sizeof(std::uint32_t)), toPtr(st.hits.ptr()),
-            std::size_t(n) * sizeof(std::uint32_t), cudaMemcpyDeviceToDevice, sc.stream));
+        if (!directHits) {
+            RTCD_CUDA_CHECK(cudaMemcpyAsync(toPtr(target), toPtr(st.hits.ptr()), std::size_t(n) * sizeof(std::uint32_t),
+                resultsOnHost_ ? cudaMemcpyDeviceToHost : cudaMemcpyDeviceToDevice, sc.stream));
+        }
+        mark(slot, Phase::ResultCopy);
         ++st.batches;
+        mark(slot, Phase::BatchEnd);
     }
 
     // -----------------------------------------------------------------------------------------------------------
@@ -379,7 +447,7 @@ namespace rtcd::detail {
 
         PrepareGraph* g = nullptr;
         for (const auto& p : st.graphs) {
-            if (p->itemCount == n) {
+            if (p->itemCount == n && p->hits == view.hitCounts.ptr) {
                 g = p.get();
                 break;
             }
@@ -390,11 +458,12 @@ namespace rtcd::detail {
             // the same staging / hit-count buffers is equivalent to calling prepare() again.
             auto entry       = std::make_unique<PrepareGraph>();
             entry->itemCount = n;
+            entry->hits      = view.hitCounts.ptr;
             cudaGraph_t graph = nullptr;
             RTCD_CUDA_CHECK(cudaStreamBeginCapture(sc.stream, cudaStreamCaptureModeThreadLocal));
             LaunchPlan plan;
             try {
-                st.hits.memsetAsync(0, std::size_t(n) * sizeof(std::uint32_t), sc.stream);
+                RTCD_CUDA_CHECK(cudaMemsetAsync(toPtr(view.hitCounts.ptr), 0, std::size_t(n) * sizeof(std::uint32_t), sc.stream));
                 st.staging.copyFromAsync(src, stagingBytes, sc.stream);
                 plan = backend_->prepare(sc, view);
             } catch (...) {
@@ -479,14 +548,22 @@ namespace rtcd::detail {
         }
     }
 
-    void DetectorCore::synchronizeStreams() {
+    void DetectorCore::synchronizeStreams(std::uint32_t used) {
         cudaError_t first = cudaSuccess;
-        for (const StreamContext& sc : streamCtx_) {
-            const cudaError_t e = cudaStreamSynchronize(sc.stream);
+        const std::size_t count = tuning_.syncUsedOnly ? std::min<std::size_t>(used, streamCtx_.size()) : streamCtx_.size();
+        for (std::uint32_t s = 0; s < count; ++s) {
+            if (s == used) {
+                mark(0, Phase::SyncUsed);
+            }
+            const cudaError_t e = cudaStreamSynchronize(streamCtx_[s].stream);
             if (first == cudaSuccess && e != cudaSuccess) {
                 first = e;
             }
         }
+        if (used >= count) {
+            mark(0, Phase::SyncUsed);
+        }
+        mark(0, Phase::SyncIdle);
         RTCD_CUDA_CHECK(first);
     }
 
