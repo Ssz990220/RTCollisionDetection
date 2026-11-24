@@ -4,11 +4,20 @@
 // CollisionDetector::check incl. its final cudaDeviceSynchronize); sampling and the host->device upload are paused,
 // as in the old benchmarks.
 //
+// One executable serves every scene (the old stack built one binary per scene: benchmarkShelf / ...ShelfSimple /
+// ...DenseShelf, BM_CURVE_Shelf / ...ShelfSimple / ...DenseShelf). Benchmark names, template arguments and argument
+// ranges are exactly the old ones, so the JSON written with --benchmark_out=<file> is read unchanged by
+// scripts/Benchmark/plots/** (see benchmark.sh / benchmark.bat for the output file names).
+//
 // App options (removed from argv before benchmark::Initialize; all other arguments go to Google Benchmark):
-//   --scene <scene.json>   default configs/scenes/shelf.json (old SHELF build; shelf_simple / shelf_dense = the
-//                          old SHELFSIMPLE / DENSESHELF builds)
-//   --robot <robot.json>   default configs/robots/panda.json
-//   --data <dir>           data folder (default: found from the working directory / executable)
+//   --scene <name | scene.json>  a name is configs/scenes/<name>.json: shelf (default, old SHELF build),
+//                                shelf_simple (old SHELFSIMPLE), shelf_dense (old DENSESHELF)
+//   --robot <robot.json>         default configs/robots/panda.json
+//   --data <dir>                 data folder (default: env RTCD_DATA_DIR, else found from the working directory /
+//                                executable)
+//   --rtcd_help                  print these options and exit
+// The JSON output's "context" gets rtcd_stack = "new", rtcd_scene, rtcd_robot and rtcd_device entries.
+// Smoke test (tests/apps): --benchmark_dry_run=true --benchmark_filter=... runs one iteration, no warm-up.
 // Environment (support/options.h): RTCD_OPTIX_CFG, RTCD_CURVE_GEOM_FLAG, RTCD_BM_REFIT_EVERY (old syntax), then
 // RTCD_OVERRIDES (new syntax), applied to every checker the app builds.
 

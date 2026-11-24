@@ -4,9 +4,14 @@
 //   BM_QUAD<nCPts, nTPts, batch>    quadratic curves, gas fast_trace         (old FAST_TRACE), OBB off
 //   BM_MESH<nTPts>, BM_RAY<nTPts>   n trajectories checked as n * nTPts discrete poses, batch 1024, OBB on
 // n trajectories sampled per iteration (old sample_trajectories: shuffle, paused) from the 8192 * 4 KNN
-// trajectories; timed region = checkDevice. The curve checkers are built per benchmark family, outside the timed
-// loop (old: robot + SBT set up per family). Options: bench_common.h. (No nsys on this app: the old BM_CURVE_Shelf
-// hangs under Nsight Systems.)
+// trajectories; timed region = checkDevice. The curve checkers are built on every call of the benchmark function
+// (once per argument and per iteration-count trial of Google Benchmark), outside the timed loop, as the old code
+// built a new curve robot + SBT per call; the BM_MESH / BM_RAY checkers are built once (static), as the old ones
+// were set up once in main. Options: bench_common.h. (No nsys on this app: the old BM_CURVE_Shelf hangs under
+// Nsight Systems.)
+// Note: with Google Benchmark 1.10 a per-benchmark MinWarmUpTime() only takes effect together with MinTime();
+// without it the --benchmark_min_warmup_time flag (default 0) applies. That holds for the old executables alike,
+// and the option is kept because it is part of the benchmark names the plotting scripts parse.
 #include "bench_common.h"
 
 #include <benchmark/benchmark.h>
