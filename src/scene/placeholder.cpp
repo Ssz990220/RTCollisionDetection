@@ -1,4 +1,5 @@
-// Skeleton placeholder so the target builds. Delete when the first real source is added.
+// Kept only for tests/skeleton (main's), which still calls this function; delete together with tests/skeleton at
+// the Wave-1 merge.
 namespace rtcd::detail {
     void scenePlaceholder() {}
 } // namespace rtcd::detail
