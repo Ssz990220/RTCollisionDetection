@@ -1,27 +1,32 @@
 # Tests of rtcd_robot (Wave 1 d owns this folder).
 #
-# Tests marked OLD-STACK PARITY include old-stack headers (RTCD/...) and / or link rtcd_legacy_kernels as the
-# reference implementation; they are deleted (or reduced to the new-stack half) together with the old stack.
+# The Panda results are compared with stored references (tests/data/reference, written from the old stack; see
+# tests/data/README.md). test_robot_kinematics_kernels_vs_old is the OLD-STACK parity test that wrote them; it is
+# deleted together with the old stack.
 
-# Old-stack include paths needed by the parity tests: RTCD/ (Robot/models/pandas.h, Robot/robot.cuh, ...) and the
-# build dir (config.h, included by pandas.h).
-set(rtcd_robot_test_legacy_includes ${PROJECT_SOURCE_DIR}/RTCD ${PROJECT_SOURCE_DIR}/3rdparty ${CMAKE_BINARY_DIR})
-
-# URDF -> chain -> KinematicsTable; pandas.h bit-for-bit parity (no GPU).
+# URDF -> chain -> KinematicsTable; the stored pandas.h table bit for bit (no GPU).
 rtcd_add_new_test(test_robot_kinematics_table LABEL new_unit
   SOURCES test_kinematics_table.cpp
-  LIBS rtcd_robot urdfdom::urdf_parser urdfdom::urdfdom_model)
-target_include_directories(test_robot_kinematics_table PRIVATE
-  ${PROJECT_SOURCE_DIR}/src ${rtcd_robot_test_legacy_includes})
+  LIBS rtcd_robot rtcd_testsupport urdfdom::urdf_parser urdfdom::urdfdom_model)
+target_include_directories(test_robot_kinematics_table PRIVATE ${PROJECT_SOURCE_DIR}/src)
 
-# RobotModel::load: Panda vs the old per-link meshModel loader; loading rules on synthetic URDFs (no GPU).
+# RobotModel::load: Panda vs the stored link summaries (old per-link meshModel loader); loading rules on synthetic
+# URDFs (no GPU).
 rtcd_add_new_test(test_robot_model LABEL new_unit
   SOURCES test_robot_model.cpp
-  LIBS rtcd_robot meshes)
-target_include_directories(test_robot_model PRIVATE ${rtcd_robot_test_legacy_includes})
+  LIBS rtcd_robot rtcd_testsupport)
 
-# New FK kernels vs the old robot.cu kernels on the cached regression poses / KNN trajectories (GPU).
+# FK kernels on the cached regression poses / KNN trajectories vs the stored old-kernel outputs (GPU).
 rtcd_add_new_test(test_robot_kinematics_kernels LABEL new_gpu
-  SOURCES test_kinematics_kernels.cpp  LIBS rtcd_robot rtcd_legacy_kernels)
-target_include_directories(test_robot_kinematics_kernels PRIVATE
-  ${PROJECT_SOURCE_DIR}/src ${rtcd_robot_test_legacy_includes})
+  SOURCES test_kinematics_kernels.cpp fk_reference_cases.h
+  LIBS rtcd_robot rtcd_testsupport)
+target_include_directories(test_robot_kinematics_kernels PRIVATE ${PROJECT_SOURCE_DIR}/src)
+
+# OLD-STACK PARITY + REFERENCE GENERATOR (delete with the old stack): new FK kernels vs the old robot.cu kernels,
+# derived table vs pandas.h; with RTCD_WRITE_REFERENCE=<dir> it writes panda_kinematics.txt and kinematics_fk.*.
+# Old-stack include paths: RTCD/ (Robot/models/pandas.h, Robot/robot.cuh) and the build dir (config.h).
+rtcd_add_new_test(test_robot_kinematics_kernels_vs_old LABEL new_gpu
+  SOURCES test_kinematics_kernels_vs_old.cpp fk_reference_cases.h
+  LIBS rtcd_robot rtcd_testsupport rtcd_legacy_kernels)
+target_include_directories(test_robot_kinematics_kernels_vs_old PRIVATE
+  ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/RTCD ${PROJECT_SOURCE_DIR}/3rdparty ${CMAKE_BINARY_DIR})

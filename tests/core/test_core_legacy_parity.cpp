@@ -2,7 +2,13 @@
 //
 // internal::obbOverlapCounts must be bit-identical to the old RTCD::BBCDRobotMask
 // (RTCD/CollisionDetector/BBCollisionDetection.cu): same counts for every robot OBB, on random OBBs including
-// degenerate (point) boxes and near-touching pairs right at the separation threshold.
+// degenerate (point) boxes and near-touching pairs right at the separation threshold. With RTCD_WRITE_REFERENCE=<dir>
+// it writes the old counts of obb_reference_cases.h to obb_overlap.txt (the stored reference of
+// test_core_obb_reference.cpp).
+#include "obb_reference_cases.h"
+
+#include <support/reference.h>
+
 #include <rtcd/context.h>
 #include <rtcd/device_buffer.h>
 #include <rtcd/internal/algorithms.h>
@@ -142,4 +148,38 @@ TEST(CoreLegacyParity, ObbOverlapCountsEqualsOldAtTheSeparationThreshold) {
         nonZero += nz;
     }
     EXPECT_GT(nonZero, 0u);
+}
+
+// GENERATOR (runs only with RTCD_WRITE_REFERENCE=<dir>): obb_overlap.txt from the OLD RTCD::BBCDRobotMask.
+TEST(CoreLegacyParity, WriteStoredReferences) {
+    namespace sup  = rtcd::support;
+    const auto dir = sup::referenceWriteDir();
+    if (!dir) {
+        GTEST_SKIP() << "set RTCD_WRITE_REFERENCE=<dir> to write the stored references";
+    }
+    auto ctx   = Context::create();
+    auto lease = ctx->acquireStreams(1);
+    sup::ReferenceWriter w(*dir / "obb_overlap.txt",
+        "Per-robot-box overlap counts of the OLD RTCD::BBCDRobotMask (RTCD/CollisionDetector/BBCollisionDetection.cu)\n"
+        "on the cases of tests/core/obb_reference_cases.h, written by tests/core/test_core_legacy_parity.cpp\n"
+        "(RTCD_WRITE_REFERENCE). <case> <robot boxes with a non-zero count> <FNV-1a of all uint32 counts>.");
+    for (const auto& c : obb_reference::cases()) {
+        std::vector<std::uint32_t> all;
+        for (const auto& r : c.runs) {
+            DeviceBuffer dA = DeviceBuffer::fromHost(std::span<const Obb>(r.robot));
+            DeviceBuffer dB = DeviceBuffer::fromHost(std::span<const Obb>(r.scene));
+            DeviceBuffer counts(r.robot.size() * 4);
+            counts.memsetAsync(0xCD, counts.size(), lease[0]);
+            RTCD::BBCDRobotMask(dA.ptr(), dB.ptr(), r.robot.size(), r.scene.size(), counts.ptr(), lease[0]);
+            ASSERT_EQ(cudaGetLastError(), cudaSuccess);
+            ASSERT_EQ(cudaStreamSynchronize(lease[0]), cudaSuccess);
+            std::vector<std::uint32_t> h(r.robot.size());
+            counts.download(h.data(), h.size() * 4);
+            all.insert(all.end(), h.begin(), h.end());
+        }
+        std::size_t nonZero = 0;
+        for (const auto v : all) nonZero += v != 0;
+        w.putHash(c.key, nonZero, sup::fnv1a(all));
+    }
+    w.save();
 }

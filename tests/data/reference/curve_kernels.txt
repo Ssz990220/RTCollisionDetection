@@ -1,0 +1,19 @@
+# Outputs of the OLD curve kernels (RTCD/Robot/robot.cu, sweptVolume.cu; pandas.h masks, the Panda spheres of
+# the RobotModel, configs/spline_weights/<degree>/normal), written by
+# tests/backend_curve/test_curve_kernels_vs_old.cpp (RTCD_WRITE_REFERENCE). <key> <bytes> <FNV-1a of the bytes>.
+# Inputs: the first n regression KNN trajectories (support::regressionInputs) with the given point count.
+fused_linear_points.37 440448 0x61d3a1cac2516060
+fused_linear_points.4096 48758784 0x85a346a757197082
+unfused_link_poses.512 3145728 0xc75b84baebceec2c
+unfused_sphere_centers.512 6094848 0x52a3fdb8e11ad017
+control_points.quad.8_16 1785600 0x37a6004c64786fa7
+fused_control_points.quad.8_16 1785600 0x37a6004c64786fa7
+control_points.cubic.8_16 1785600 0xec08cd475f57de34
+fused_control_points.cubic.8_16 1785600 0xec08cd475f57de34
+control_points.quad.4_8 892800 0x792e84329b36392f
+fused_control_points.quad.4_8 892800 0x792e84329b36392f
+control_points.quad.6_12 1339200 0x39cc09bc60238500
+fused_control_points.quad.6_12 1339200 0x39cc09bc60238500
+control_points.quad.4_128 190464 0xc707c2ea0cba5857
+linear_segment_obbs.real 14284800 0xbd1fef9643d74390
+linear_segment_obbs.injected 14284800 0xa8061903e7d77c00

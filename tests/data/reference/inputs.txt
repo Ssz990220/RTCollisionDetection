@@ -1,0 +1,10 @@
+# Inputs of the OLD harness (RTCD/Utils/Test/poseUtils.h randomMotions / genCSpaceKNNTraj, ccRegression.cpp),
+# written by tests/testsupport/test_testsupport_vs_old.cpp (RTCD_WRITE_REFERENCE). <key> <floats> <FNV-1a>.
+# regression.<points>: the first 4096 KNN trajectories of genCSpaceKNNTraj<7, 4096, 4>(points) (points = 1:
+# randomMotions(4096)); pool.poses: randomMotions(8192); pool.knn_idx: the 8192 x 4 neighbour indices (int32).
+regression.1 28672 0x8f73b8764523148c
+regression.16 458752 0x771974ed624aff03
+regression.8 229376 0x9d8aab2de15ae835
+regression.32 917504 0x1d53f61eb79bbf93
+pool.poses 57344 0x359ef57ffa337bb4
+pool.knn_idx 32768 0x29cea3535e2e6a25

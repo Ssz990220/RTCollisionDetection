@@ -1,19 +1,18 @@
 // tests/robot: RobotModel::load (new_unit, no GPU).
 //
-// OLD-STACK PARITY TEST (first test): compares the loaded Panda against the old robot<DOF>::loadURDF path, i.e. one
-// RTCD::meshModel(urdfLink, meshDir, sphereDir) per chain link in chain order (what robot<DOF>::traverseInitRobot
-// builds; the old robot<DOF> object itself needs a GPU for its constant-memory masks, so the per-link loader is
-// used directly). Uses old-stack headers (target `meshes`): delete that test with the old stack.
-#define NOMINMAX // optix_stubs.h (via mesh.h) includes <windows.h>
+// The loaded Panda is compared with stored references written from the OLD stack before it was removed
+// (tests/data/reference): panda_kinematics.txt (the hand-written pandas.h table) and meshes.txt (link.<name>: the
+// old per-link loader RTCD::meshModel(urdfLink, meshDir, sphereDir) that robot<DOF>::loadURDF used, in chain
+// order). Format: tests/support/mesh_reference.h.
 #include <rtcd/errors.h>
 #include <rtcd/robot_model.h>
 
-#include <Meshes/mesh.h>
-#include <optix_function_table_definition.h>
-#include <Robot/models/pandas.h>
+#include <support/mesh_reference.h>
+#include <support/reference.h>
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <bit>
 #include <cmath>
 #include <cstring>
@@ -39,21 +38,6 @@ namespace {
         }
         return d;
     }
-
-    std::uint32_t bits(float f) { return std::bit_cast<std::uint32_t>(f); }
-
-    bool sameEdges(const std::vector<int2>& o, const std::vector<Edge>& n) {
-        if (o.size() != n.size()) {
-            return false;
-        }
-        for (std::size_t i = 0; i < o.size(); ++i) {
-            if (static_cast<std::uint32_t>(o[i].x) != n[i][0] || static_cast<std::uint32_t>(o[i].y) != n[i][1]) {
-                return false;
-            }
-        }
-        return true;
-    }
-
     // A temporary directory for synthetic URDF / sphere files.
     struct TempDir {
         fs::path dir;
@@ -74,66 +58,45 @@ namespace {
 
 } // namespace
 
-TEST(RobotModel, PandaMatchesOldRobotLoader) {
+TEST(RobotModel, PandaMatchesTheStoredOldRobotLoader) {
     const auto m = RobotModel::load(pandaDesc());
     ASSERT_EQ(m->dof(), 7u);
     ASSERT_EQ(m->numLinks(), 8u);
     EXPECT_EQ(m->name(), "panda");
     EXPECT_TRUE(m->hasSpheres());
-    EXPECT_EQ(std::memcmp(&m->kinematics().cosMask[0][0], cosMask.data(), sizeof(float) * cosMask.size()), 0);
+    const auto kin = support::ReferenceFile::load(support::referenceDir() / "panda_kinematics.txt");
+    for (std::uint32_t j = 0; j < m->dof(); ++j) {
+        const std::vector<float> want = kin.floats("cos_mask." + std::to_string(j));
+        ASSERT_EQ(want.size(), 12u);
+        EXPECT_EQ(std::memcmp(&m->kinematics().cosMask[j][0], want.data(), 12 * sizeof(float)), 0) << "joint " << j;
+    }
 
-    const urdf::ModelInterfaceSharedPtr model = urdf::parseURDFFile(kUrdf.string());
-    ASSERT_TRUE(model);
-    std::vector<float> oldCenters, oldRadii;
-    std::vector<std::int32_t> oldLink;
+    std::vector<float> centers, radii;
+    std::vector<std::int32_t> link;
     for (std::uint32_t l = 0; l < m->numLinks(); ++l) {
         const LinkGeometry& g = m->links()[l];
         SCOPED_TRACE(g.name);
         EXPECT_EQ(g.name, "panda_link" + std::to_string(l));
         EXPECT_TRUE(g.mergedLinks.empty());
-        const RTCD::meshModel old(model->getLink(g.name), kMeshDir.string(), kSphDir.string());
-
-        ASSERT_EQ(old.mesh.vertices.size(), g.mesh.vertices.size());
-        std::size_t vbad = 0;
-        for (std::size_t i = 0; i < g.mesh.vertices.size(); ++i) {
-            const float3 o = old.mesh.vertices[i];
-            vbad += bits(o.x) != bits(g.mesh.vertices[i][0]) || bits(o.y) != bits(g.mesh.vertices[i][1])
-                  || bits(o.z) != bits(g.mesh.vertices[i][2]);
-        }
-        EXPECT_EQ(vbad, 0u);
-        ASSERT_EQ(old.mesh.indices.size(), g.mesh.triangles.size());
-        std::size_t tbad = 0;
-        for (std::size_t i = 0; i < g.mesh.triangles.size(); ++i) {
-            const int3 o = old.mesh.indices[i];
-            tbad += static_cast<std::uint32_t>(o.x) != g.mesh.triangles[i][0]
-                  || static_cast<std::uint32_t>(o.y) != g.mesh.triangles[i][1]
-                  || static_cast<std::uint32_t>(o.z) != g.mesh.triangles[i][2];
-        }
-        EXPECT_EQ(tbad, 0u);
-        EXPECT_TRUE(sameEdges(old.mesh.uniqueEdgeIndices, g.mesh.uniqueEdges));
-        EXPECT_TRUE(sameEdges(old.mesh.loopEdgeIndices, g.mesh.loopEdges));
-        // Link OBB, not collapsed (the old SKIP_BASE collapse is the backends' job).
-        const RTCD::OBB oobb = old.getOBB();
-        EXPECT_EQ(std::memcmp(&oobb, &g.obb, sizeof(Obb)), 0);
+        // mesh, edges and the link OBB (not collapsed: the old SKIP_BASE collapse is the backends' job)
+        support::expectMeshMatchesReference("link." + g.name, g.mesh, g.obb);
+        support::expectSpheresMatchReference("link." + g.name, g.spheres);
         EXPECT_EQ(g.meshFile, kMeshDir / (l == 7 ? "link7_nohand.obj" : "link" + std::to_string(l) + ".obj"));
         EXPECT_EQ(g.sphereFile, kSphDir / (g.name + ".txt"));
-
-        ASSERT_EQ(old.sphereOrigins.size(), g.spheres.size());
-        for (std::size_t s = 0; s < g.spheres.size(); ++s) {
-            oldCenters.insert(oldCenters.end(), {old.sphereOrigins[s].x, old.sphereOrigins[s].y, old.sphereOrigins[s].z});
-            oldRadii.push_back(old.sphereRadii[s]);
-            oldLink.push_back(static_cast<std::int32_t>(l));
+        for (const Sphere& s : g.spheres) {
+            centers.insert(centers.end(), s.center.begin(), s.center.end());
+            radii.push_back(s.radius);
+            link.push_back(static_cast<std::int32_t>(l));
         }
     }
-    // Flat arrays = old sphereCentersTemplate / sphereRadiusTemplate / sphereIdxToLinkIdx.
+    // Flat arrays = old sphereCentersTemplate / sphereRadiusTemplate / sphereIdxToLinkIdx: link spheres in chain order.
     EXPECT_EQ(m->totalSpheres(), 62u);
-    ASSERT_EQ(m->sphereCenters().size(), oldCenters.size());
-    EXPECT_EQ(std::memcmp(m->sphereCenters().data(), oldCenters.data(), oldCenters.size() * sizeof(float)), 0);
-    ASSERT_EQ(m->sphereRadii().size(), oldRadii.size());
-    EXPECT_EQ(std::memcmp(m->sphereRadii().data(), oldRadii.data(), oldRadii.size() * sizeof(float)), 0);
-    EXPECT_TRUE(std::equal(oldLink.begin(), oldLink.end(), m->sphereLink().begin(), m->sphereLink().end()));
+    ASSERT_EQ(m->sphereCenters().size(), centers.size());
+    EXPECT_EQ(std::memcmp(m->sphereCenters().data(), centers.data(), centers.size() * sizeof(float)), 0);
+    ASSERT_EQ(m->sphereRadii().size(), radii.size());
+    EXPECT_EQ(std::memcmp(m->sphereRadii().data(), radii.data(), radii.size() * sizeof(float)), 0);
+    EXPECT_TRUE(std::equal(link.begin(), link.end(), m->sphereLink().begin(), m->sphereLink().end()));
 }
-
 TEST(RobotModel, JointNamesLimitsAndHostFk) {
     const auto m = RobotModel::load(pandaDesc(false));
     EXPECT_FALSE(m->hasSpheres());

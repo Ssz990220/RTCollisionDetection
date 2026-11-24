@@ -1,15 +1,23 @@
 # Tests of rtcd_backend_curve (Wave 2h owns this folder).
 
-# OLD-STACK PARITY: the curve kernels (fused / unfused point generation, control points, segment OBBs) vs the old
-# robot.cu / sweptVolume.cu kernels, byte for byte; segment compaction vs a host reference. Includes the backend's
-# private header (src/backend_curve/curve_kernels.h) and old-stack headers. Delete the old-stack half with the old
-# stack.
+# The curve kernels (fused / unfused point generation, control points, segment OBBs) vs the stored hashes of the
+# old robot.cu / sweptVolume.cu kernels' outputs (tests/data/reference/curve_kernels.txt), byte for byte; fused ==
+# unfused; segment containment; segment compaction vs a host reference. Includes the backend's private header.
 rtcd_add_new_test(test_curve_kernels LABEL new_gpu
   SOURCES test_curve_kernels.cpp
-  LIBS rtcd_backend_curve rtcd_json rtcd_testsupport rtcd_legacy_kernels)
-target_include_directories(test_curve_kernels PRIVATE
-  ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/RTCD ${PROJECT_SOURCE_DIR}/3rdparty ${CMAKE_BINARY_DIR})
+  LIBS rtcd_backend_curve rtcd_json rtcd_testsupport)
+target_include_directories(test_curve_kernels PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_compile_definitions(test_curve_kernels PRIVATE NOMINMAX)
+
+# OLD-STACK PARITY + REFERENCE GENERATOR (delete with the old stack): the same kernels vs the old ones; with
+# RTCD_WRITE_REFERENCE=<dir> it writes curve_kernels.txt. Includes old-stack headers.
+rtcd_add_new_test(test_curve_kernels_vs_old LABEL new_gpu
+  SOURCES test_curve_kernels_vs_old.cpp
+  LIBS rtcd_backend_curve rtcd_json rtcd_testsupport rtcd_legacy_kernels)
+target_include_directories(test_curve_kernels_vs_old PRIVATE
+  ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/RTCD ${PROJECT_SOURCE_DIR}/3rdparty ${CMAKE_BINARY_DIR})
+target_compile_definitions(test_curve_kernels_vs_old PRIVATE NOMINMAX)
+set_tests_properties(test_curve_kernels_vs_old PROPERTIES LABELS "new_gpu;backend_curve")
 
 # createCurveBackend end to end through the ReferenceBatchRunner: ProgramSet, refit policies vs the goldens, OBB
 # culling on == off (design doc Q5), cubic determinism, construction errors.
@@ -18,9 +26,17 @@ rtcd_add_new_test(test_backend_curve LABEL new_gpu
   LIBS rtcd_backend_curve rtcd_json rtcd_testsupport)
 target_compile_definitions(test_backend_curve PRIVATE NOMINMAX)
 
-# OLD-STACK PARITY: refit policies (auto / always / never / every 3) x item counts, three consecutive checks each,
-# old CollisionDetector (side-by-side runner's old half) vs the new backend: identical flags; flips vs the golden are
-# printed. Delete with the old stack.
+# Refit policies (auto / always / never / every 3) x item counts, three consecutive checks each: the new backend
+# deviates from the golden exactly as the old detector did (stored: tests/data/reference/refit_flags.txt).
+rtcd_add_new_test(test_refit_reference LABEL new_gpu
+  SOURCES test_refit_reference.cpp
+  LIBS rtcd_backend_curve rtcd_json rtcd_testsupport)
+target_compile_definitions(test_refit_reference PRIVATE NOMINMAX)
+set_tests_properties(test_refit_reference PROPERTIES LABELS "new_gpu;backend_curve")
+
+# OLD-STACK PARITY + REFERENCE GENERATOR: the same sequences on the old CollisionDetector (side-by-side runner's old
+# half) vs the new backend: identical flags; flips vs the golden are printed; with RTCD_WRITE_REFERENCE=<dir> it
+# writes refit_flags.txt. Delete with the old stack.
 if(TARGET rtcd_sbs_old_shelf)
   rtcd_add_new_test(test_refit_parity_vs_old LABEL new_gpu
     SOURCES test_refit_parity_vs_old.cpp

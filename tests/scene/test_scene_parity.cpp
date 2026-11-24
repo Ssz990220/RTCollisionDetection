@@ -3,7 +3,8 @@
 // singleVertices, concatenated by scene::addObstacle and uploaded by scene::uploadToDevice), the per-obstacle
 // ray counts / offsets (old obsVertCnt / whereInEdge, in vertices = 2 per ray) and the obstacle OBBs (old
 // scene::getdOBBs), compared bit for bit on the device buffers. Label new_gpu (both scenes upload).
-// Includes OLD-STACK headers: DELETE THIS TEST TOGETHER WITH THE OLD STACK.
+// Includes OLD-STACK headers: DELETE THIS TEST TOGETHER WITH THE OLD STACK. With RTCD_WRITE_REFERENCE=<dir> it
+// writes tests/data/reference/scenes.txt from the old scenes (the stored reference of test_scene_reference.cpp).
 
 #ifndef NOMINMAX
 #define NOMINMAX // optix_stubs.h (via the old headers) includes <windows.h>
@@ -13,6 +14,8 @@
 
 // old stack (reference). The OptiX function table comes from rtcd_core (its own object file).
 #include <CollisionScenes/scene.h>
+
+#include <support/reference.h>
 
 #include <gtest/gtest.h>
 
@@ -121,4 +124,43 @@ TEST(SceneParity, DenseShelf) {
 }
 TEST(SceneParity, ShelfSimple) {
     compareScene(kShelfSimple);
+}
+
+// GENERATOR (runs only with RTCD_WRITE_REFERENCE=<dir>): scenes.txt from the OLD RTCD::scene.
+TEST(SceneParity, WriteStoredReferences) {
+    namespace sup  = rtcd::support;
+    const auto dir = sup::referenceWriteDir();
+    if (!dir) {
+        GTEST_SKIP() << "set RTCD_WRITE_REFERENCE=<dir> to write the stored references";
+    }
+    sup::ReferenceWriter w(*dir / "scenes.txt",
+        "Edge-ray buffers and obstacle OBBs of the OLD RTCD::scene (RTCD/CollisionScenes) for the three shelf scenes,\n"
+        "written by tests/scene/test_scene_parity.cpp (RTCD_WRITE_REFERENCE). Device buffers as uploaded:\n"
+        "<scene>.<unique|loop>.rays <rays> <FNV-1a of the 6 floats (origin, target) per ray>; .ray_counts and\n"
+        ".first_ray per obstacle in rays (old obsVertCnt / whereInEdge halved); <scene>.obbs <n> <FNV-1a of the OBBs>.");
+    const std::pair<const char*, const std::vector<ObstacleRef>*> scenes[] = {
+        {"shelf", &kShelf}, {"shelf_dense", &kDenseShelf}, {"shelf_simple", &kShelfSimple}};
+    for (const auto& [name, list] : scenes) {
+        sharedContext()->makeCurrent();
+        for (const bool loop : {false, true}) {
+            const auto old        = buildOld(*list, loop);
+            const std::string key = std::string(name) + (loop ? ".loop" : ".unique");
+            const std::size_t n   = old->getSgRayCnt();
+            const auto rays       = downloadBytes<float>(old->getdSgVerts(), 6 * n);
+            w.putHash(key + ".rays", n, sup::fnv1a(rays));
+            std::vector<std::uint32_t> counts, first;
+            const auto where = downloadBytes<uint>(old->getWhereInEdgePtr(), old->getObsVertCnt().size());
+            for (std::size_t o = 0; o < where.size(); ++o) {
+                counts.push_back(old->getObsVertCnt()[o] / 2);
+                first.push_back(where[o] / 2);
+            }
+            w.putInts(key + ".ray_counts", counts);
+            w.putInts(key + ".first_ray", first);
+            if (!loop) {
+                const auto obbs = downloadBytes<RTCD::OBB>(old->getdOBBs(), old->getNumObstacles());
+                w.putHash(std::string(name) + ".obbs", obbs.size(), sup::fnv1a(obbs));
+            }
+        }
+    }
+    w.save();
 }

@@ -1,0 +1,12 @@
+# Per-item hit counts of the OLD CollisionDetector<MESH> of the IAS regression (side-by-side profile reg_ias:
+# 4 streams, batch 128, compaction, OBB culling) on the first N regression poses, written by
+# tests/backend_mesh/test_backend_mesh_vs_old.cpp (RTCD_WRITE_REFERENCE).
+# hit_counts.<N> <N> <FNV-1a of the N uint32 counts>; hits_total.<N> <sum>; ias_hit_counts.bin: the 4096 counts.
+hit_counts.4096 4096 0xae5c6097898a8b02
+hits_total.4096 299428
+hit_counts.517 517 0xb0fd33c9ebfef06e
+hits_total.517 39077
+hit_counts.37 37 0x8721253cb82eacf2
+hits_total.37 1591
+hit_counts.1 1 0x4d25767f9dce13f5
+hits_total.1 0

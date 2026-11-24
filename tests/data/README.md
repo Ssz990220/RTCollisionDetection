@@ -24,3 +24,35 @@ are not committed. How the inputs are rebuilt from these files (trajectory arith
 alters a collision flag is a bug until proven otherwise, and the old stack that produced them is gone. Per-item
 hit counts may differ between implementations; flags may not. Replacing a golden needs an explicit decision by
 the owner, with the reason and the differing items recorded in the commit message.
+
+## reference/ — stored outputs of the old stack
+
+Before the old stack was deleted, the new-stack tests that compared with it (by calling old code) were replaced by
+comparisons with stored values. The files below were written FROM THE OLD STACK by those parity tests, run with
+`RTCD_WRITE_REFERENCE=tests/data/reference` (each parity test has a `WriteStoredReferences` test or writes while it
+compares; the generators were deleted with the old stack and live on in the history: tag `old-stack-final` plus the
+commit that added this section). At that commit the new stack reproduced every one of them exactly.
+
+Text files: `<key> <values...>`, `#` comments; float values as 8-digit hex bit patterns, hashes as 16-digit hex.
+**Hash = 64-bit FNV-1a** (offset basis `0xcbf29ce484222325`, prime `0x100000001b3`) over the raw little-endian bytes
+of the array in element order (`tests/support/reference.h`). A key `<k> <n> <hash>` gives the element / byte count
+first.
+
+| File | Content (old code that produced it) | Compared by |
+|---|---|---|
+| `panda_kinematics.txt` | the hand-written Panda masks / base of `RTCD/Robot/models/pandas.h`, exact floats | `tests/robot/test_kinematics_table.cpp`, `test_robot_model.cpp` |
+| `kinematics_fk.txt`, `kinematics_fk_poses.bin`, `kinematics_fk_traj.bin` | old FK kernels (`robot.cu`: `batchFkineAdj`, `batchFkineAdjOBB`, `batchOBBTransform`, `batchFkineTraj`) on the 4096 regression poses / trajectories: hashes of the complete outputs; raw link poses (float32) of every 64th pose and every 512th trajectory (`tests/robot/fk_reference_cases.h`) | `tests/robot/test_kinematics_kernels.cpp` |
+| `meshes.txt` | old loader `RTCD::meshModel`: per mesh vertex / triangle / unique-edge / loop-edge counts and hashes, OBB, and for the 8 Panda links the sphere hashes (`tests/support/mesh_reference.h`) | `tests/geometry/test_geometry_reference.cpp`, `tests/robot/test_robot_model.cpp` |
+| `scenes.txt` | old `RTCD::scene` on the three shelf scenes: edge-ray buffer hashes (unique and loop edges), per-obstacle ray counts / offsets, obstacle OBB hash | `tests/scene/test_scene_reference.cpp` |
+| `obb_overlap.txt` | old `RTCD::BBCDRobotMask` counts on the deterministic boxes of `tests/core/obb_reference_cases.h` | `tests/core/test_core_obb_reference.cpp` |
+| `curve_kernels.txt` | old curve kernels (`batchFkineSphrTraj`, `batchFkineTraj` + `batchSphrCntrTraj` + `batchGenControlPoints`, `genCurveOBB<1>`) on the regression trajectories | `tests/backend_curve/test_curve_kernels.cpp` |
+| `refit_flags.txt` | old `CollisionDetector` (profiles `reg_linear` / `reg_quad`) under every refit policy: per check, the items whose flag differs from the golden | `tests/backend_curve/test_refit_reference.cpp` |
+| `ias_hit_counts.txt`, `ias_hit_counts.bin` | old `CollisionDetector<MESH>` (profile `reg_ias`) per-item hit counts (uint32) on the first 4096 / 517 / 37 / 1 regression poses | `tests/backend_mesh/test_backend_mesh_reference.cpp` |
+| `inputs.txt` | old harness `randomMotions` / `genCSpaceKNNTraj` outputs (regression inputs with 1, 8, 16, 32 points; benchmark pool) | `tests/testsupport/test_testsupport_unit.cpp` |
+| `spline_weights.txt` | manifest of the old `RTCD/data/weights` tables (now `configs/spline_weights`), content hashed with CR removed | `tests/json/test_json.cpp` |
+
+The hashes are bit-exact: a compiler, CUDA or driver change that alters the last bit of a kernel output makes the
+corresponding test fail. That is intended (it is how the bit-identity with the old stack is kept), but such a
+failure is not automatically a bug: check the four goldens (`rtcd_regression_*`, label `regression`) first. As with
+the goldens, references are never re-recorded to make a test pass; replacing one is an explicit owner decision with
+the reason in the commit message.

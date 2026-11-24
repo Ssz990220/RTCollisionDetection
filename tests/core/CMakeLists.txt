@@ -30,8 +30,13 @@ rtcd_add_new_test(test_core_accel LABEL new_gpu
   SOURCES test_core_accel.cpp trace_params.h
   LIBS rtcd_core rtcd_core_test_ir)
 
+# obbOverlapCounts vs the stored counts of the old RTCD::BBCDRobotMask (tests/data/reference/obb_overlap.txt).
+rtcd_add_new_test(test_core_obb_reference LABEL new_gpu
+  SOURCES test_core_obb_reference.cpp obb_reference_cases.h
+  LIBS rtcd_core rtcd_testsupport)
+
 # Parity with the OLD STACK (links rtcd_legacy_kernels; delete with the old stack): obbOverlapCounts vs
-# RTCD::BBCDRobotMask, bit-identical counts.
+# RTCD::BBCDRobotMask, bit-identical counts; with RTCD_WRITE_REFERENCE=<dir> it writes obb_overlap.txt.
 rtcd_add_new_test(test_core_legacy_parity LABEL new_gpu
-  SOURCES test_core_legacy_parity.cpp
-  LIBS rtcd_core rtcd_legacy_kernels)
+  SOURCES test_core_legacy_parity.cpp obb_reference_cases.h
+  LIBS rtcd_core rtcd_testsupport rtcd_legacy_kernels)

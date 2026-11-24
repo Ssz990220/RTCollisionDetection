@@ -12,6 +12,7 @@ add_library(rtcd_testsupport STATIC
   golden.cpp
   options.cpp
   timing.cpp
+  reference.cpp
   reference_executor.cpp
 )
 target_include_directories(rtcd_testsupport

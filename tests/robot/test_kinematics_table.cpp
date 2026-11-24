@@ -1,12 +1,12 @@
 // tests/robot: URDF -> chain -> KinematicsTable (new_unit, no GPU).
 //
-// OLD-STACK PARITY TEST: includes RTCD/Robot/models/pandas.h (the hand-written Panda masks) as the reference.
-// Delete the pandas.h comparison together with the old stack.
+// Reference: tests/data/reference/panda_kinematics.txt, the old stack's hand-written Panda masks (pandas.h, removed
+// with the old stack) stored as exact float bit patterns.
 #include "robot/urdf_chain.h"
 
 #include <rtcd/errors.h>
 
-#include <Robot/models/pandas.h> // old stack: Dim, baseT, cosMask, sinMask, oneMask, lowerBound, upperBound
+#include <support/reference.h>
 
 #include <urdf_model/model.h>
 #include <urdf_parser/urdf_parser.h>
@@ -38,7 +38,7 @@ namespace {
         for (std::size_t i = 0; i < n; ++i) {
             if (std::bit_cast<std::uint32_t>(got[i]) != std::bit_cast<std::uint32_t>(want[i])) {
                 ADD_FAILURE() << what << "[joint " << i / rowLen << "][" << i % rowLen << "]: derived " << hexf(got[i])
-                              << ", pandas.h " << hexf(want[i]);
+                              << ", stored " << hexf(want[i]);
                 ++diffs;
             }
         }
@@ -63,20 +63,32 @@ namespace {
 
 } // namespace
 
-// THE make-or-break result of Wave 1 d: the table derived at run time equals pandas.h bit for bit.
-TEST(KinematicsTable, PandaUrdfEqualsPandasHBitForBit) {
+// THE make-or-break result of Wave 1 d: the table derived at run time equals the old hand-written pandas.h bit for
+// bit (stored copy).
+TEST(KinematicsTable, PandaUrdfEqualsStoredPandasHTableBitForBit) {
+    const auto ref            = support::ReferenceFile::load(support::referenceDir() / "panda_kinematics.txt");
+    const std::size_t dof     = ref.integer("dof");
     const Chain chain         = loadChain(kPandaUrdf);
     const KinematicsTable tab = kinematicsFromChain(chain);
-    ASSERT_EQ(tab.dof, static_cast<std::uint32_t>(Dim));
-    ASSERT_EQ(tab.numLinks, static_cast<std::uint32_t>(Dim + 1));
+    ASSERT_EQ(dof, 7u);
+    ASSERT_EQ(tab.dof, static_cast<std::uint32_t>(dof));
+    ASSERT_EQ(tab.numLinks, static_cast<std::uint32_t>(dof + 1));
 
     int diffs = 0;
-    diffs += compareBits("cosMask", &tab.cosMask[0][0], cosMask.data(), cosMask.size());
-    diffs += compareBits("sinMask", &tab.sinMask[0][0], sinMask.data(), sinMask.size());
-    diffs += compareBits("oneMask", &tab.oneMask[0][0], oneMask.data(), oneMask.size());
-    diffs += compareBits("base", tab.base, baseT.data(), baseT.size());
+    for (std::size_t j = 0; j < dof; ++j) {
+        const std::string s = std::to_string(j);
+        for (const auto& [name, row] : {std::pair{"cos_mask.", &tab.cosMask[j][0]}, std::pair{"sin_mask.", &tab.sinMask[j][0]},
+                 std::pair{"one_mask.", &tab.oneMask[j][0]}}) {
+            const std::vector<float> want = ref.floats(name + s);
+            ASSERT_EQ(want.size(), kTransformFloats) << name << s;
+            diffs += compareBits((name + s).c_str(), row, want.data(), want.size());
+        }
+    }
+    const std::vector<float> base = ref.floats("base");
+    ASSERT_EQ(base.size(), 12u);
+    diffs += compareBits("base", tab.base, base.data(), base.size());
     // Rows j >= dof must be +0.0 exactly.
-    for (std::size_t j = Dim; j < kMaxDof; ++j) {
+    for (std::size_t j = dof; j < kMaxDof; ++j) {
         for (std::size_t e = 0; e < kTransformFloats; ++e) {
             EXPECT_EQ(std::bit_cast<std::uint32_t>(tab.cosMask[j][e]), 0u);
             EXPECT_EQ(std::bit_cast<std::uint32_t>(tab.sinMask[j][e]), 0u);
@@ -85,7 +97,7 @@ TEST(KinematicsTable, PandaUrdfEqualsPandasHBitForBit) {
     }
     EXPECT_EQ(tab.reserved[0], 0u);
     EXPECT_EQ(tab.reserved[1], 0u);
-    EXPECT_EQ(diffs, 0) << "derived Panda table differs from RTCD/Robot/models/pandas.h";
+    EXPECT_EQ(diffs, 0) << "derived Panda table differs from the stored pandas.h table";
 }
 
 // Without the 1e-9 snap the cos(+-pi/2) residues of the URDF's 1.57079632679 would survive as tiny non-zeros:

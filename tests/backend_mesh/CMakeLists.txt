@@ -7,8 +7,15 @@ rtcd_add_new_test(test_backend_mesh LABEL new_gpu
   SOURCES test_backend_mesh.cpp mesh_test_fixture.h
   LIBS rtcd_backend_mesh rtcd_testsupport rtcd_json)
 
-# OLD-STACK parity (deleted with the old stack): per-item hit counts equal the old CollisionDetector<MESH> of the
-# IAS regression (side-by-side old half, profile reg_ias).
+# Per-item hit counts equal the stored counts of the old CollisionDetector<MESH> of the IAS regression
+# (tests/data/reference/ias_hit_counts.*).
+rtcd_add_new_test(test_backend_mesh_reference LABEL new_gpu
+  SOURCES test_backend_mesh_reference.cpp mesh_test_fixture.h
+  LIBS rtcd_backend_mesh rtcd_testsupport rtcd_json)
+
+# OLD-STACK parity + REFERENCE GENERATOR (deleted with the old stack): per-item hit counts equal the old
+# CollisionDetector<MESH> of the IAS regression (side-by-side old half, profile reg_ias); with
+# RTCD_WRITE_REFERENCE=<dir> it writes ias_hit_counts.txt / .bin.
 if(TARGET rtcd_sbs_old_shelf)
   rtcd_add_new_test(test_backend_mesh_vs_old LABEL new_gpu
     SOURCES test_backend_mesh_vs_old.cpp mesh_test_fixture.h

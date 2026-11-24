@@ -6,6 +6,8 @@
 // of the first N regression trajectories (the 2nd and 3rd can take the refit path: same item count per stream).
 // Per policy (auto = default, always, never, every 3) and geometry flag, the per-item flags of old and new must be
 // identical for every check; every flag that differs from the golden is printed with its direction.
+// REFERENCE GENERATOR: with RTCD_WRITE_REFERENCE=<dir> it writes the OLD detector's deviations from the golden for
+// every check to refit_flags.txt, the stored reference of test_refit_reference.cpp.
 #include <old_runner.h>
 
 #include <rtcd/backend.h>
@@ -18,6 +20,7 @@
 #include <support/golden.h>
 #include <support/inputs.h>
 #include <support/paths.h>
+#include <support/reference.h>
 
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
@@ -40,6 +43,21 @@ namespace {
         RefitPolicy newPolicy;
         std::optional<std::size_t> oldRefitEvery; // old setRefitPolicy(K); nullopt = REFIT_AUTO (default)
     };
+
+    // all checks of all cases (one file, rewritten after every case)
+    support::ReferenceWriter* refitWriter() {
+        static std::unique_ptr<support::ReferenceWriter> w;
+        if (!w) {
+            const auto dir = support::referenceWriteDir();
+            if (!dir) return nullptr;
+            w = std::make_unique<support::ReferenceWriter>(*dir / "refit_flags.txt",
+                "Refit-policy sequences of the OLD CollisionDetector (side-by-side runner's old half, profiles reg_linear /\n"
+                "reg_quad), written by tests/backend_curve/test_refit_parity_vs_old.cpp (RTCD_WRITE_REFERENCE). For every N,\n"
+                "three consecutive checks of the first N regression trajectories (16 points):\n"
+                "<mode>.<geometry flag>.<policy>.<N>.<check> <items whose flag differs from the golden> [their indices]");
+        }
+        return w.get();
+    }
 
     void runCase(Mode mode, const Policy& pol, std::optional<GeometryFlags> geom, const char* geomName) {
         const bool linear  = mode == Mode::LinearCurve;
@@ -79,6 +97,14 @@ namespace {
                 old->check();
                 const support::Flags fOld = support::flagsFromCounts(old->hitCounts(n));
                 const auto dOldNew        = support::diffFlags(fOld, fNew, n);
+                if (auto* w = refitWriter()) {
+                    const auto d = support::diffFlags(fOld, golden, n, n);
+                    std::vector<std::string> v{std::to_string(d.differing)};
+                    for (const std::size_t i : d.firstIndices) v.push_back(std::to_string(i));
+                    w->put(std::string(linear ? "linear" : "quad") + "." + geomName + "." + pol.name + "." + std::to_string(n)
+                               + "." + std::to_string(rep + 1),
+                        v);
+                }
                 mismatchChecks += !dOldNew.equal();
                 EXPECT_EQ(dOldNew.differing, 0u) << "old vs new, N " << n << " check " << rep + 1;
                 for (int side = 0; side < 2; ++side) {
@@ -99,6 +125,7 @@ namespace {
         std::cout << "[ case ] " << (linear ? "linear" : "quad") << " geom=" << geomName << " policy=" << pol.name
                   << ": 27 checks, old/new mismatching checks: " << mismatchChecks << "\n";
         cudaDeviceSynchronize();
+        if (auto* w = refitWriter()) w->save();
     }
 
     class RefitParityVsOld : public ::testing::Test {
@@ -110,7 +137,7 @@ namespace {
     };
 
     const Policy kPolicies[] = {
-        {"auto(default)", {RefitPolicy::Kind::Auto, 0}, std::nullopt},
+        {"auto", {RefitPolicy::Kind::Auto, 0}, std::nullopt},
         {"always", {RefitPolicy::Kind::Always, 0}, std::size_t(0)},
         {"never", {RefitPolicy::Kind::Never, 0}, std::size_t(1)},
         {"every3", {RefitPolicy::Kind::Every, 3}, std::size_t(3)},
@@ -119,11 +146,11 @@ namespace {
 } // namespace
 
 TEST_F(RefitParityVsOld, Linear) {
-    for (const Policy& p : kPolicies) runCase(Mode::LinearCurve, p, std::nullopt, "auto(none)");
+    for (const Policy& p : kPolicies) runCase(Mode::LinearCurve, p, std::nullopt, "auto");
 }
 
 TEST_F(RefitParityVsOld, QuadSingleAnyHit) {
-    for (const Policy& p : kPolicies) runCase(Mode::QuadraticCurve, p, std::nullopt, "auto(single_anyhit)");
+    for (const Policy& p : kPolicies) runCase(Mode::QuadraticCurve, p, std::nullopt, "auto");
 }
 
 TEST_F(RefitParityVsOld, QuadGeometryFlagNone) {

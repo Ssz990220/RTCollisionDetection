@@ -9,9 +9,12 @@
 // file they read is asserted to exist first. No GPU work runs (the cache path of the old code is host only).
 // The old code reads only PROJECT_BASE_DIR/data (the local, gitignored folder that generated the reference data);
 // the new code reads the committed copies in tests/data. Without the local folder every test here is skipped.
+// REFERENCE GENERATOR: with RTCD_WRITE_REFERENCE=<dir> it writes the hashes of the old harness' inputs to
+// inputs.txt, the stored reference of test_testsupport_unit.cpp (Inputs.MatchTheStoredOldHarness).
 #include <support/golden.h>
 #include <support/inputs.h>
 #include <support/paths.h>
+#include <support/reference.h>
 
 #include <Utils/Test/testUtils.h> // old: readBin, randomMotions, genCSpaceKNNTraj (defines the OptiX table too)
 
@@ -143,4 +146,37 @@ TEST(VsOld, GoldensDecodeIdentically) {
         const sup::Flags nw = sup::readFlagsFile(p, 4096);
         EXPECT_EQ(nw, old) << m;
     }
+}
+
+// GENERATOR (runs only with RTCD_WRITE_REFERENCE=<dir>): inputs.txt from the OLD harness functions.
+TEST(VsOld, WriteStoredReferences) {
+    const auto dir = sup::referenceWriteDir();
+    if (!dir) {
+        GTEST_SKIP() << "set RTCD_WRITE_REFERENCE=<dir> to write the stored references";
+    }
+    SKIP_WITHOUT_OLD_DATA();
+    requireCache(4096, true);
+    requireCache(8192, true);
+    sup::ReferenceWriter w(*dir / "inputs.txt",
+        "Inputs of the OLD harness (RTCD/Utils/Test/poseUtils.h randomMotions / genCSpaceKNNTraj, ccRegression.cpp),\n"
+        "written by tests/testsupport/test_testsupport_vs_old.cpp (RTCD_WRITE_REFERENCE). <key> <floats> <FNV-1a>.\n"
+        "regression.<points>: the first 4096 KNN trajectories of genCSpaceKNNTraj<7, 4096, 4>(points) (points = 1:\n"
+        "randomMotions(4096)); pool.poses: randomMotions(8192); pool.knn_idx: the 8192 x 4 neighbour indices (int32).");
+    {
+        const auto p = oldPoses<4096>();
+        w.putHash("regression.1", p.size() * kDim, sup::fnv1a(p));
+    }
+    for (int nT : {16, 8, 32}) {
+        auto t = oldTraj<4096>(nT);
+        t.resize(std::size_t(4096) * nT); // ccRegression copies the first NITEMS trajectories
+        w.putHash("regression." + std::to_string(nT), t.size() * kDim, sup::fnv1a(t));
+    }
+    {
+        const auto p = oldPoses<8192>();
+        w.putHash("pool.poses", p.size() * kDim, sup::fnv1a(p));
+        std::vector<int> idx;
+        readBin((oldMotions() / "Panda" / "1111111" / "8192_knn4_idx.bin").string(), idx);
+        w.putHash("pool.knn_idx", idx.size(), sup::fnv1a(idx));
+    }
+    w.save();
 }

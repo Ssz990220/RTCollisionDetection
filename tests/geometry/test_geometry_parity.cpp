@@ -1,5 +1,7 @@
 // Parity of rtcd_geometry with the old stack's loader (RTCD/Meshes/mesh.h, Obb.h). Host only (label new_unit),
-// but it includes old-stack headers: DELETE THIS TEST TOGETHER WITH THE OLD STACK.
+// but it includes old-stack headers: DELETE THIS TEST TOGETHER WITH THE OLD STACK. It is also the GENERATOR of
+// tests/data/reference/meshes.txt (run with RTCD_WRITE_REFERENCE=<dir>), the stored summaries that replace it
+// (test_geometry_reference.cpp, test_robot_model.cpp).
 //
 // Compared bit for bit (float bit patterns, index values, order):
 //   * every Panda link mesh, loaded the way the old robot loads it (meshModel(urdfLink, meshDir, sphereDir) on
@@ -15,6 +17,9 @@
 #endif
 #include <rtcd/geometry.h>
 
+#include <support/mesh_reference.h>
+#include <support/reference.h>
+
 // old stack (reference implementation); mesh.h first, as the old tests do (the OptiX table definition pulls in
 // <windows.h> and its min / max macros)
 #include <Meshes/mesh.h>
@@ -22,6 +27,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <bit>
 #include <cstring>
 #include <filesystem>
@@ -210,4 +216,84 @@ TEST(GeometryParity, RotatedScaledPose) {
     }
     const RTCD::meshModel old(path, affine, 1.7f);
     expectSameMesh(old, rtcd::loadObjMesh(path, pose, 1.7f), "Sheep rotated, scale 1.7");
+}
+
+namespace {
+    template <typename T>
+    void putArray(rtcd::support::ReferenceWriter& w, const std::string& key, const std::vector<T>& v) {
+        w.putHash(key, v.size(), rtcd::support::fnv1a(v));
+    }
+    // The old meshModel's arrays: float3 / int3 / int2 have the byte layout of Vec3 / uint32 triples / Edge.
+    void putOldMesh(rtcd::support::ReferenceWriter& w, const std::string& label, const RTCD::meshModel& old) {
+        static_assert(sizeof(float3) == 12 && sizeof(int3) == 12 && sizeof(int2) == 8);
+        putArray(w, label + ".vertices", old.mesh.vertices);
+        putArray(w, label + ".triangles", old.mesh.indices);
+        putArray(w, label + ".unique_edges", old.mesh.uniqueEdgeIndices);
+        putArray(w, label + ".loop_edges", old.mesh.loopEdgeIndices);
+        const RTCD::OBB obb = old.getOBB();
+        w.putFloats(label + ".obb", std::span<const float>(reinterpret_cast<const float*>(&obb), 15));
+    }
+} // namespace
+
+// GENERATOR (runs only with RTCD_WRITE_REFERENCE=<dir>): meshes.txt from the OLD loader.
+TEST(GeometryParity, WriteStoredReferences) {
+    namespace sup  = rtcd::support;
+    const auto dir = sup::referenceWriteDir();
+    if (!dir) {
+        GTEST_SKIP() << "set RTCD_WRITE_REFERENCE=<dir> to write the stored references";
+    }
+    sup::ReferenceWriter w(*dir / "meshes.txt",
+        "Mesh summaries from the OLD loader RTCD::meshModel (RTCD/Meshes/mesh.h), written by\n"
+        "tests/geometry/test_geometry_parity.cpp (RTCD_WRITE_REFERENCE). Format: tests/support/mesh_reference.h.\n"
+        "link.<name>: meshModel(urdfLink, meshes/Simplified/watertight/, spheres/) of panda.urdf (the old robot loader);\n"
+        "obstacle.<file>@x,y,z: meshModel(models/<file>, translation, scale 1) of the three shelf scenes;\n"
+        "rotated.curobo/Sheep.obj: fromXyzRpy(0.1, -0.2, 0.3, 0.3, -0.7, 1.1), scale 1.7.");
+    const std::string urdfPath  = kModels + "/franka_description/panda.urdf";
+    const std::string meshDir   = kModels + "/franka_description/meshes/Simplified/watertight/";
+    const std::string sphereDir = kModels + "/franka_description/spheres/";
+    const urdf::ModelInterfaceSharedPtr model = urdf::parseURDFFile(urdfPath);
+    ASSERT_TRUE(model);
+    int links = 0;
+    for (const auto& [name, link] : model->links_) {
+        if (!link->visual || !link->visual->geometry || link->visual->geometry->type != urdf::Geometry::MESH) {
+            continue;
+        }
+        const std::string urdfFile = static_cast<const urdf::Mesh*>(link->visual->geometry.get())->filename;
+        const std::string meshFile = meshDir + "/" + urdfFile.substr(urdfFile.rfind('/') + 1);
+        if (!fs::exists(meshFile) || !fs::exists(sphereDir + "/" + name + ".txt")) {
+            continue;
+        }
+        const RTCD::meshModel old(link, meshDir, sphereDir);
+        const std::string label = "link." + name;
+        putOldMesh(w, label, old);
+        static_assert(sizeof(float3) == 12);
+        w.put(label + ".spheres", {std::to_string(old.sphereOrigins.size()), sup::hex64(sup::fnv1a(old.sphereOrigins)),
+                                      sup::hex64(sup::fnv1a(old.sphereRadii))});
+        ++links;
+    }
+    EXPECT_EQ(links, 8);
+    std::vector<std::string> done;
+    for (const auto* list : {&kShelf, &kDenseShelf, &kShelfSimple}) {
+        for (const ObstacleRef& ob : *list) {
+            const std::string label = sup::obstacleLabel(ob.file, ob.x, ob.y, ob.z);
+            if (std::find(done.begin(), done.end(), label) != done.end()) {
+                continue;
+            }
+            done.push_back(label);
+            Eigen::Affine3f pose = Eigen::Affine3f::Identity();
+            pose.translate(Eigen::Vector3f(ob.x, ob.y, ob.z));
+            putOldMesh(w, label, RTCD::meshModel(kModels + "/" + ob.file, pose, 1.0f));
+        }
+    }
+    {
+        const rtcd::Transform pose = rtcd::Transform::fromXyzRpy(0.1, -0.2, 0.3, 0.3, -0.7, 1.1);
+        Eigen::Affine3f affine     = Eigen::Affine3f::Identity();
+        for (int r = 0; r < 3; ++r) {
+            for (int c = 0; c < 4; ++c) {
+                affine.matrix()(r, c) = pose.m[static_cast<std::size_t>(r * 4 + c)];
+            }
+        }
+        putOldMesh(w, "rotated.curobo/Sheep.obj", RTCD::meshModel(kModels + "/curobo/Sheep.obj", affine, 1.7f));
+    }
+    w.save();
 }

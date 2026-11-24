@@ -1,0 +1,25 @@
+# Edge-ray buffers and obstacle OBBs of the OLD RTCD::scene (RTCD/CollisionScenes) for the three shelf scenes,
+# written by tests/scene/test_scene_parity.cpp (RTCD_WRITE_REFERENCE). Device buffers as uploaded:
+# <scene>.<unique|loop>.rays <rays> <FNV-1a of the 6 floats (origin, target) per ray>; .ray_counts and
+# .first_ray per obstacle in rays (old obsVertCnt / whereInEdge halved); <scene>.obbs <n> <FNV-1a of the OBBs>.
+shelf.unique.rays 107631 0x710e1d8ae9778078
+shelf.unique.ray_counts 162 11175 11175 16032 8784 21312 3660 35331
+shelf.unique.first_ray 0 162 11337 22512 38544 47328 68640 72300
+shelf.obbs 8 0xc0de65e3534cc5e6
+shelf.loop.rays 117713 0x76341eb420b29f1c
+shelf.loop.ray_counts 185 12950 12950 17512 9860 23477 4457 36322
+shelf.loop.first_ray 0 185 13135 26085 43597 53457 76934 81391
+shelf_dense.unique.rays 303667 0x383af2c83daf411b
+shelf_dense.unique.ray_counts 162 19433 19433 16032 59840 59840 59840 8784 21312 3660 35331
+shelf_dense.unique.first_ray 0 162 19595 39028 55060 114900 174740 234580 243364 264676 268336
+shelf_dense.obbs 11 0xa256f217c4401b55
+shelf_dense.loop.rays 332692 0x1087ea42087be064
+shelf_dense.loop.ray_counts 185 22326 22326 17512 65409 65409 65409 9860 23477 4457 36322
+shelf_dense.loop.first_ray 0 185 22511 44837 62349 127758 193167 258576 268436 291913 296370
+shelf_simple.unique.rays 22512 0x0b3cf41e3f263710
+shelf_simple.unique.ray_counts 162 11175 11175
+shelf_simple.unique.first_ray 0 162 11337
+shelf_simple.obbs 3 0xdff5335798a9e1a7
+shelf_simple.loop.rays 26085 0x908330bb7f6e0311
+shelf_simple.loop.ray_counts 185 12950 12950
+shelf_simple.loop.first_ray 0 185 13135
