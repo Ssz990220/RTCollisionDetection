@@ -1,4 +1,9 @@
-include_directories(${CMAKE_CURRENT_SOURCE_DIR})
+# Directory-scoped include paths of the old stack (moved here from the top level so they do not leak into the new
+# tree): RTCD/ itself, 3rdparty/ (tiny_obj_loader.h) and the build dir (config.h).
+include_directories(${CMAKE_CURRENT_SOURCE_DIR}
+                    ${PROJECT_SOURCE_DIR}/3rdparty
+                    ${CUDA_INCLUDE_DIRS}
+                    ${CMAKE_BINARY_DIR})
 
 # All CUDA kernels of the old stack, compiled once and linked into every old-stack executable (they used to be
 # recompiled per executable through CU_SRC / UTIL_CUDA_SRC). No .cu depends on per-executable compile definitions

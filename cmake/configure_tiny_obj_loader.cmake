@@ -20,4 +20,9 @@ if(NOT TINYOBJLOADER_STATUS_CODE EQUAL 0)
 endif()
 endif()
 
-include_directories(${PROJECT_SOURCE_DIR}/3rdparty)
+# The old stack adds 3rdparty/ as a directory include path (RTCD/CMakeLists.txt); new-tree targets link this
+# interface target instead.
+if(NOT TARGET rtcd_tinyobjloader)
+  add_library(rtcd_tinyobjloader INTERFACE)
+  target_include_directories(rtcd_tinyobjloader SYSTEM INTERFACE ${PROJECT_SOURCE_DIR}/3rdparty)
+endif()
