@@ -289,6 +289,18 @@ namespace rtcd::detail {
             st.batches = st.launches = st.hostSyncs = st.paramUploads = 0;
         }
 
+        // Step 4b: pending work on the legacy default stream (typically the caller's pageable cudaMemcpy of the
+        // items, which returns before its DMA has finished) is waited for on the host first. The checker's streams
+        // are blocking streams, so their work would wait for it on the GPU anyway; but on Windows, work submitted
+        // while a legacy-stream copy is still pending pays a cross-queue dependency of ~15 us (measured:
+        // rtcd_bench_discrete BM_RAY N=1 45 -> 27 us, BM_IAS N=1 95 -> 78 us). Idle legacy stream: one query.
+        const cudaError_t legacy = cudaStreamQuery(cudaStreamLegacy);
+        if (legacy == cudaErrorNotReady) {
+            RTCD_CUDA_CHECK(cudaStreamSynchronize(cudaStreamLegacy));
+        } else {
+            RTCD_CUDA_CHECK(legacy);
+        }
+
         // Step 5: per-check policy, calling thread, before any prepare(). Nothing is enqueued yet.
         backend_->beginCheck(CheckInfo{count, nb});
         mark(0, Phase::BeginCheck);

@@ -70,6 +70,7 @@ namespace {
         std::string overrides;
         bool tables = true;
         bool emulateHost = false;
+        bool settle      = false; // --settle 1: cudaDeviceSynchronize after the (untimed) device-item upload
         // Each variant = extra rtcd::applyOverrides text on top of the mode's config ("" = as is); one checker per
         // variant, all alternated rep by rep.
         std::vector<std::string> variants{""};
@@ -217,6 +218,7 @@ int main(int argc, char** argv) {
         else if (a == "--override") o.overrides = v;
         else if (a == "--tables") o.tables = v != "0";
         else if (a == "--emulate-host") o.emulateHost = v != "0";
+        else if (a == "--settle") o.settle = v != "0";
         else if (a == "--variants") {
             o.variants.clear();
             std::stringstream ss(v);
@@ -347,7 +349,10 @@ int main(int argc, char** argv) {
                             const std::size_t idx = rng() % poolItems;
                             std::copy_n(pool.begin() + std::ptrdiff_t(idx * fpi), fpi, host.begin() + std::ptrdiff_t(k * fpi));
                         }
-                        if (path == "device") items.upload(host.data(), n * fpi * sizeof(float));
+                        if (path == "device") {
+                            items.upload(host.data(), n * fpi * sizeof(float)); // pageable, as the benchmarks
+                            if (o.settle) cudaDeviceSynchronize(); // let that upload's DMA finish (untimed)
+                        }
                         // every variant: one traced and one untraced check on the same items, order rotated per rep
                         for (std::size_t j = 0; j < 2 * V; ++j) {
                             const std::size_t v = (j / 2 + std::size_t(r)) % V;
