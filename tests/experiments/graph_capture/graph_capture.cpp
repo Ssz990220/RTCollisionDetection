@@ -1111,6 +1111,7 @@ int main(int argc, char** argv) {
             const ModeSpec m = modeSpec(name);
             const Env e      = makeEnv(ctx, m);
             if (what == "launch") launchOnly(e, m);
+            if (what == "fallback_update" && isContinuous(m.mode)) fallbackCorrectness(e, m, RefitPolicy::Kind::Always);
             // Experiments that put an OptiX call into a capture (launch, correctness, failures, fallback for the AS-
             // building modes) leave the OptiX context with an invalid internal event: run each in its own process.
             if (what == "fallback" || (what == "all" && m.mode == Mode::Ray)) {
