@@ -1,7 +1,8 @@
 // rtcd_bench_discrete: new-stack equivalent of RTCD/Benchmark/Discrete (benchmarkShelf / ...Simple / ...DenseShelf;
 // the scene is --scene instead of a compile definition). BM_IAS and BM_RAY: 4 streams, batch 1024, OBB culling on,
 // link GAS fast_trace_compact (old COMPACT); n poses sampled per iteration from the 8192 cached poses (std::sample,
-// paused), timed region = checkDevice. Options: bench_common.h.
+// paused), timed region = checkDevice. Options: bench_common.h. (MinWarmUpTime(4) is inert with Google Benchmark
+// 1.10 unless MinTime() is set too, for the old executables alike; kept because it is part of the benchmark names.)
 #include "bench_common.h"
 
 #include <benchmark/benchmark.h>

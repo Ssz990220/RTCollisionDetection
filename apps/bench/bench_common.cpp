@@ -6,6 +6,8 @@
 #include <rtcd/errors.h>
 #include <rtcd/json_config.h>
 
+#include <benchmark/benchmark.h>
+
 #include <algorithm>
 #include <cstdlib>
 #include <iostream>
@@ -31,6 +33,28 @@ namespace rtcd::bench {
         return config;
     }
 
+    namespace {
+        void printAppOptions(const char* exe) {
+            std::cout << "usage: " << exe
+                      << " [--scene <name | scene.json>] [--robot <robot.json>] [--data <dir>] [Google Benchmark options]\n"
+                         "  --scene  shelf (default) | shelf_simple | shelf_dense (= configs/scenes/<name>.json) or a\n"
+                         "           scene JSON path\n"
+                         "  --robot  robot JSON (default configs/robots/panda.json)\n"
+                         "  --data   data folder holding motions/ (default: env RTCD_DATA_DIR, else <repo>/data)\n"
+                         "Environment: RTCD_OPTIX_CFG, RTCD_CURVE_GEOM_FLAG, RTCD_BM_REFIT_EVERY (old syntax), then\n"
+                         "RTCD_OVERRIDES (\"path=value,...\", rtcd::applyOverrides) for every checker.\n"
+                         "Google Benchmark's own options: --help.\n";
+        }
+
+        // A bare name (no directory part, no extension) is configs/scenes/<name>.json.
+        fs::path scenePathFor(const fs::path& arg, const fs::path& cfgs) {
+            if (!arg.has_parent_path() && !arg.has_extension()) {
+                return cfgs / "scenes" / (arg.string() + ".json");
+            }
+            return arg;
+        }
+    } // namespace
+
     Environment& setup(int& argc, char** argv) {
         std::optional<fs::path> scenePath, robotPath, dataPath;
         int out = 1;
@@ -42,14 +66,18 @@ namespace rtcd::bench {
                     std::exit(2);
                 }
                 (a == "--scene" ? scenePath : a == "--robot" ? robotPath : dataPath) = fs::path(argv[++i]);
+            } else if (a == "--rtcd_help") {
+                printAppOptions(argv[0]);
+                std::exit(0);
             } else {
                 argv[out++] = argv[i];
             }
         }
         argc = out;
+        argv[argc] = nullptr;
         try {
             const fs::path cfgs = support::configsDir();
-            const SceneDesc sd  = loadSceneDesc(scenePath.value_or(cfgs / "scenes" / "shelf.json"));
+            const SceneDesc sd  = loadSceneDesc(scenePathFor(scenePath.value_or("shelf"), cfgs));
             const RobotDesc rd  = loadRobotDesc(robotPath.value_or(cfgs / "robots" / "panda.json"));
             ContextOptions co   = ContextOptions::buildDefault();
             support::applyLegacyEnv(support::readEnvSettings(), nullptr, &co);
@@ -61,6 +89,10 @@ namespace rtcd::bench {
             g_env.sceneName        = sd.name;
             std::cerr << "[bench] scene " << sd.name << ", robot " << g_env.robot->name() << ", device "
                       << g_env.context->deviceInfo().name << "\n";
+            benchmark::AddCustomContext("rtcd_stack", "new");
+            benchmark::AddCustomContext("rtcd_scene", sd.name);
+            benchmark::AddCustomContext("rtcd_robot", g_env.robot->name());
+            benchmark::AddCustomContext("rtcd_device", g_env.context->deviceInfo().name);
         } catch (const std::exception& e) {
             std::cerr << "[bench] setup failed: " << e.what() << "\n";
             std::exit(3);
