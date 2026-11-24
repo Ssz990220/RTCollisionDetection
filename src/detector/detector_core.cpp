@@ -85,6 +85,7 @@ namespace rtcd::detail {
         if (cfg_.hostDispatch == HostDispatch::ThreadPerStream) {
             workers_ = std::make_unique<StreamWorkers>(cfg_.numStreams);
         }
+
     }
 
     DetectorCore::~DetectorCore() {
@@ -96,6 +97,7 @@ namespace rtcd::detail {
             }
         }
         drainStreams();
+        destroyPrepareGraphs();
         pipeline_.reset();
         backend_.reset(); // before the lease returns the streams and before robot / scene / context references go
     }
@@ -306,17 +308,7 @@ namespace rtcd::detail {
         const std::size_t fpi     = layout_.floatsPerItem();
         const std::size_t fpiBytes = fpi * sizeof(float);
 
-        // 7.1 zero the batch's hit counters.
-        st.hits.memsetAsync(0, std::size_t(n) * sizeof(std::uint32_t), sc.stream);
-        // 7.2 staging copy of the batch's items (packed in the staging buffer).
         const DevicePtr src = source.base + std::uint64_t(first) * source.strideBytes;
-        if (source.strideBytes == fpiBytes) {
-            st.staging.copyFromAsync(src, std::size_t(n) * fpiBytes, sc.stream);
-        } else {
-            RTCD_CUDA_CHECK(cudaMemcpy2DAsync(toPtr(st.staging.ptr()), fpiBytes, toPtr(src), source.strideBytes, fpiBytes, n,
-                cudaMemcpyDeviceToDevice, sc.stream));
-        }
-
         BatchView view;
         view.batchIndex = b;
         view.firstItem  = first;
@@ -324,11 +316,30 @@ namespace rtcd::detail {
         view.items      = DeviceSpan<const float>{st.staging.ptr(), std::size_t(n) * fpi};
         view.hitCounts  = DeviceSpan<std::uint32_t>{st.hits.ptr(), n};
 
-        // 7.3 mode-specific work.
-        if (backend_->synchronizesHost(n)) {
-            ++st.hostSyncs;
+        LaunchPlan plan;
+        if (cfg_.graphPrepare && source.strideBytes == fpiBytes && backend_->prepareCapturable(n)) {
+            // 7.1 - 7.3 as one cudaGraphLaunch (CheckerConfig::graphPrepare, Backend::prepareCapturable).
+            if (backend_->synchronizesHost(n)) {
+                internalError("backend '" + pipeline_->moduleName() + "': prepareCapturable(" + str(n)
+                              + ") and synchronizesHost(" + str(n) + ") are both true");
+            }
+            plan = graphPrepare(s, view, src, std::size_t(n) * fpiBytes);
+        } else {
+            // 7.1 zero the batch's hit counters.
+            st.hits.memsetAsync(0, std::size_t(n) * sizeof(std::uint32_t), sc.stream);
+            // 7.2 staging copy of the batch's items (packed in the staging buffer).
+            if (source.strideBytes == fpiBytes) {
+                st.staging.copyFromAsync(src, std::size_t(n) * fpiBytes, sc.stream);
+            } else {
+                RTCD_CUDA_CHECK(cudaMemcpy2DAsync(toPtr(st.staging.ptr()), fpiBytes, toPtr(src), source.strideBytes, fpiBytes,
+                    n, cudaMemcpyDeviceToDevice, sc.stream));
+            }
+            // 7.3 mode-specific work.
+            if (backend_->synchronizesHost(n)) {
+                ++st.hostSyncs;
+            }
+            plan = backend_->prepare(sc, view);
         }
-        const LaunchPlan plan = backend_->prepare(sc, view);
 
         // 7.4 params upload (skipped when byte-identical to this stream's last upload) + launch.
         if (plan.launch) {
@@ -355,6 +366,110 @@ namespace rtcd::detail {
         RTCD_CUDA_CHECK(cudaMemcpyAsync(toPtr(results + std::uint64_t(first) * sizeof(std::uint32_t)), toPtr(st.hits.ptr()),
             std::size_t(n) * sizeof(std::uint32_t), cudaMemcpyDeviceToDevice, sc.stream));
         ++st.batches;
+    }
+
+    // -----------------------------------------------------------------------------------------------------------
+    // CheckerConfig::graphPrepare (CUDA graph replay of steps 7.1 - 7.3)
+    // -----------------------------------------------------------------------------------------------------------
+
+    LaunchPlan DetectorCore::graphPrepare(std::uint32_t s, const BatchView& view, DevicePtr src, std::size_t stagingBytes) {
+        StreamState& st         = streams_[s];
+        const StreamContext& sc = streamCtx_[s];
+        const std::uint32_t n   = view.itemCount;
+
+        PrepareGraph* g = nullptr;
+        for (const auto& p : st.graphs) {
+            if (p->itemCount == n) {
+                g = p.get();
+                break;
+            }
+        }
+        if (g == nullptr) {
+            // Capture steps 7.1 - 7.3 once for this (stream, item count). prepareCapturable(n) promises plain CUDA
+            // work only and a plan / params that depend only on (stream, n): replaying the graph on new contents of
+            // the same staging / hit-count buffers is equivalent to calling prepare() again.
+            auto entry       = std::make_unique<PrepareGraph>();
+            entry->itemCount = n;
+            cudaGraph_t graph = nullptr;
+            RTCD_CUDA_CHECK(cudaStreamBeginCapture(sc.stream, cudaStreamCaptureModeThreadLocal));
+            LaunchPlan plan;
+            try {
+                st.hits.memsetAsync(0, std::size_t(n) * sizeof(std::uint32_t), sc.stream);
+                st.staging.copyFromAsync(src, stagingBytes, sc.stream);
+                plan = backend_->prepare(sc, view);
+            } catch (...) {
+                (void) cudaStreamEndCapture(sc.stream, &graph);
+                if (graph != nullptr) {
+                    cudaGraphDestroy(graph);
+                }
+                (void) cudaGetLastError();
+                throw;
+            }
+            RTCD_CUDA_CHECK(cudaStreamEndCapture(sc.stream, &graph));
+            entry->graph = graph;
+            // The one memcpy node is the staging copy (prepare() of a capturable backend issues no copy itself).
+            std::size_t count = 0;
+            RTCD_CUDA_CHECK(cudaGraphGetNodes(graph, nullptr, &count));
+            std::vector<cudaGraphNode_t> nodes(count);
+            RTCD_CUDA_CHECK(cudaGraphGetNodes(graph, nodes.data(), &count));
+            for (cudaGraphNode_t node : nodes) {
+                cudaGraphNodeType type{};
+                RTCD_CUDA_CHECK(cudaGraphNodeGetType(node, &type));
+                if (type == cudaGraphNodeTypeMemcpy) {
+                    if (entry->stagingNode != nullptr) {
+                        cudaGraphDestroy(graph);
+                        internalError("DetectorCore graph prepare: the captured prepare() issued a memcpy of its own");
+                    }
+                    entry->stagingNode = node;
+                }
+            }
+            const cudaError_t inst = cudaGraphInstantiate(&entry->exec, graph, 0);
+            if (inst != cudaSuccess || entry->stagingNode == nullptr) {
+                cudaGraphDestroy(graph);
+                RTCD_CUDA_CHECK(inst);
+                internalError("DetectorCore graph prepare: no staging-copy node in the captured graph");
+            }
+            entry->stagingSrc = src;
+            entry->plan       = plan;
+            if (plan.paramsBytes > kMaxLaunchParamsBytes) {
+                internalError("DetectorCore graph prepare: paramsBytes > kMaxLaunchParamsBytes");
+            }
+            if (plan.paramsBytes > 0 && plan.params != nullptr) {
+                std::memcpy(entry->params.data(), plan.params, plan.paramsBytes);
+            }
+            if (st.graphs.size() >= kMaxPrepareGraphs) {
+                // Oldest out; its last launch is ordered before anything enqueued later on this stream, and
+                // cudaGraphExecDestroy may be called while a launch of it is pending.
+                cudaGraphExecDestroy(st.graphs.front()->exec);
+                cudaGraphDestroy(st.graphs.front()->graph);
+                st.graphs.erase(st.graphs.begin());
+            }
+            st.graphs.push_back(std::move(entry));
+            g = st.graphs.back().get();
+        } else if (g->stagingSrc != src) {
+            // Same item count, other source address (another batch of the check / other device items).
+            RTCD_CUDA_CHECK(cudaGraphExecMemcpyNodeSetParams1D(g->exec, g->stagingNode, toPtr(st.staging.ptr()), toPtr(src),
+                stagingBytes, cudaMemcpyDeviceToDevice));
+            g->stagingSrc = src;
+        }
+        RTCD_CUDA_CHECK(cudaGraphLaunch(g->exec, sc.stream));
+        LaunchPlan plan = g->plan;
+        plan.params     = plan.paramsBytes > 0 ? g->params.data() : nullptr;
+        return plan;
+    }
+
+    void DetectorCore::destroyPrepareGraphs() noexcept {
+        for (StreamState& st : streams_) {
+            for (const auto& g : st.graphs) {
+                if (g->exec != nullptr) {
+                    cudaGraphExecDestroy(g->exec);
+                }
+                if (g->graph != nullptr) {
+                    cudaGraphDestroy(g->graph);
+                }
+            }
+            st.graphs.clear();
+        }
     }
 
     void DetectorCore::drainStreams() noexcept {

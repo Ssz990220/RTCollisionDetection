@@ -19,3 +19,11 @@ foreach(hit_mode first_hit_ch first_hit_miss traverse)
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
   set_tests_properties(rtcd_regression_ray_${hit_mode} PROPERTIES LABELS "new_gpu;regression")
 endforeach()
+
+# The golden regression with CheckerConfig::graph_prepare off (rtcd_regression_ray runs the default, on): the ray
+# batches then take the direct path (zero, staging copy, prepare() as separate calls).
+add_test(NAME rtcd_regression_ray_nograph
+  COMMAND rtcd_regression --setup ${PROJECT_SOURCE_DIR}/configs/setups/regression_ray.json
+          --override graph_prepare=false
+  WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+set_tests_properties(rtcd_regression_ray_nograph PROPERTIES LABELS "new_gpu;regression")

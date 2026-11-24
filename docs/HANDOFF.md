@@ -155,8 +155,43 @@ bound on the hardware advantage): end to end 1.9x (batch 16) to 2.2x (batch 128)
 faster, GAS build 1.35-1.5x faster, GAS memory 7.2 vs 13.4 MB (batch 128). With hardware LSS the GAS build
 dominates at small batches (381 of ~520 us per batch of 16).
 
-**Ideas not yet tried:** CUDA Graph capture of the per-batch sequence (the paths without host sync are ready for
-it: RAY always, IAS below the compaction threshold, curves without OBB culling); Rocaps intersector for quadratic
+**CUDA Graph capture (Track G0, 2026-11-24; experiment `tests/experiments/graph_capture`, feature `graph_prepare`).**
+- **OptiX calls cannot be captured** (OptiX 9.1, driver 610.88, CUDA runtime/driver API reported as 13030). In
+  every capture mode (thread-local, global, relaxed): `optixLaunch` alone "captures" without error but the graph
+  holds only a 64-byte D2D param memcpy; the replay (and the capture itself) traces nothing (0 hits vs 16374 direct).
+  After other captured work it fails with `OPTIX_ERROR_CUDA_ERROR` ("Failed to query command list event",
+  `cuEventQuery` -> `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED`, then "Error launching work to RTX"); in relaxed mode a
+  whole 32-batch check captures (225 nodes, no trace work) and replays with 0 of 1383 collisions.
+  `optixAccelBuild` adds no node for IAS BUILD / UPDATE and linear-curve GAS BUILD / UPDATE (the build is silently
+  dropped); for quadratic curves part of the build is captured (4 kernels + 2 memcpy) and the replay fails with
+  `CUDA_ERROR_ILLEGAL_ADDRESS` (sticky). Every capture containing an OptiX call leaves an OptiX internal event invalid:
+  later direct `optixLaunch` calls may fail with `OPTIX_ERROR_INVALID_VALUE` and `optixDeviceContextDestroy` fails.
+  `OPTIX_FORCE_DEPRECATED_LAUNCHER=1` changes nothing. Host-syncing paths (mesh compaction, curve OBB) fail cleanly
+  (`cudaErrorStreamCaptureUnsupported` at the sync; the context stays usable).
+- **Host cost per call** (direct, one stream, calling thread, medians [p90] us): memset 2.3 [13], D2D copy 3.1,
+  kernel ~2.9, `optixLaunch` 8.1-9.6 [21-40]; `prepare()`: ray 8.7, mesh masked 15.8, mesh OBB off 11.8, linear
+  8.3-9.0, quad 33-39 (IAS / GAS build ~5-7 us host for IAS / linear). A graph replacing memset + copy + 3 kernels
+  costs ~4.6 us; capture ~10 us + instantiate ~22 us per new (stream, item count).
+- **What is used:** for RAY the CUDA part (zero, staging copy, `prepare()` kernels) is replayed as one graph per
+  batch (`graph_prepare`, default on; `Backend::prepareCapturable`); `optixLaunch` and the result copy stay direct
+  (7 -> 3 host calls per batch). `rtcd_bench_discrete --rtcd_graph_bench` (4 streams, batch 1024), same process,
+  10 interleaved repetitions, two runs, median us (stddev <= 4.6):
+
+  | N | BM_RAY_NOGRAPH (off) | BM_RAY (on) | on / off |
+  |---|---|---|---|
+  | 1 | 50.65 / 50.68 | 38.23 / 38.96 | 0.75 / 0.77 |
+  | 16 | 57.95 / 58.53 | 45.38 / 45.24 | 0.78 / 0.77 |
+  | 256 | 118.96 / 119.77 | 107.67 / 108.48 | 0.91 / 0.91 |
+  | 1024 | 311.15 / 313.13 | 299.72 / 300.57 | 0.96 / 0.96 |
+  | 4096 | 1001.81 / 1001.47 | 936.57 / 936.12 | 0.93 / 0.93 |
+
+  BM_IAS is unaffected (its `prepare()` builds the IAS, not capturable): N = 1 / 16 / 1024 at 98.5-99.6 /
+  148.6-150.3 / 612.7-614.5 us on and off (separate processes, alternated).
+- **Next (not done):** mesh / curves would need `prepare()` split into a capturable CUDA part and a direct OptiX part
+  (estimated ~10 us per batch for mesh masked, ~4 us for curves); the result copy could go if the programs wrote
+  into the result range.
+
+**Ideas not yet tried:** Rocaps intersector for quadratic
 curves (`OPTIX_PRIMITIVE_TYPE_ROUND_QUADRATIC_BSPLINE_ROCAPS`; it intersects a true swept sphere, so results
 would change and need new references); running a single-batch check on the calling thread instead of waking a
 worker; one hit-group record instead of `maxBatchSize * numLinks` identical ones in mesh mode; the fused FK+OBB

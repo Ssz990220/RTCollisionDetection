@@ -57,6 +57,7 @@ Loaded by `rtcd::loadCheckerConfig(path)` / `parseCheckerConfig(text, baseDir)` 
 | `collapse_root_link_obb` | boolean | `true` | runtime | shrink link 0's OBB to its center point before OBB culling (the old stack's `SKIP_BASE`; the goldens were recorded with it) |
 | `scene_edges` | `"auto"` \| `"unique"` \| `"loop"` | `"auto"` | runtime | which obstacle edges become rays in `mesh` and the curve modes. `"auto"`: `unique` for `mesh`, `loop` for the curve modes. `loop` needs every obstacle to be watertight. Ignored by `ray` |
 | `verbosity` | `"error"` \| `"warning"` \| `"info"` \| `"debug"` | `"warning"` | runtime | level of this checker's messages; they go to the Context's `Logger` |
+| `graph_prepare` | boolean | `true` | runtime | replay the capturable part of a batch (zeroing, staging copy, the backend's prepare) as one CUDA graph launch per batch; applies only to batches for which the backend reports its prepare as capturable (currently every `ray` batch; `mesh` and the curve modes build an acceleration structure per batch, which cannot be captured); never changes results. `false` = one host call per step, as before 2026-11-24 |
 | `optix` | object | see below | runtime | OptiX compile / link options |
 | `mesh` | object | see below | runtime | read only when `mode` is `mesh` |
 | `ray` | object | see below | runtime | read only when `mode` is `ray` |

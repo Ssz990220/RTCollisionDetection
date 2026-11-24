@@ -98,6 +98,7 @@ namespace {
         EXPECT_EQ(a.collapseRootLinkObb, b.collapseRootLinkObb);
         EXPECT_EQ(a.sceneEdges, b.sceneEdges);
         EXPECT_EQ(a.verbosity, b.verbosity);
+        EXPECT_EQ(a.graphPrepare, b.graphPrepare);
         EXPECT_EQ(a.optix.optLevel, b.optix.optLevel);
         EXPECT_EQ(a.optix.debugLevel, b.optix.debugLevel);
         EXPECT_EQ(a.optix.maxRegisterCount, b.optix.maxRegisterCount);
@@ -379,7 +380,7 @@ TEST(JsonChecker, EveryKeyIsRead) {
     const std::string json = R"({
         "mode": "cubic_curve", "streams": 3, "host_dispatch": "single_thread", "max_batch_size": 64,
         "max_items_per_check": 1000, "obb_culling": false, "collapse_root_link_obb": false, "scene_edges": "unique",
-        "verbosity": "debug",
+        "verbosity": "debug", "graph_prepare": false,
         "optix": { "opt_level": 2, "debug_level": "moderate", "max_register_count": 0,
                    "exceptions": ["user", "stack_overflow"], "max_trace_depth": 1, "print_pipeline_log": true },
         "mesh": { "link_gas_build": "fast_trace", "compaction_min_poses": 0,
@@ -398,6 +399,7 @@ TEST(JsonChecker, EveryKeyIsRead) {
     EXPECT_FALSE(c.collapseRootLinkObb);
     EXPECT_EQ(c.sceneEdges, EdgeSet::Unique);
     EXPECT_EQ(c.verbosity, LogLevel::Debug);
+    EXPECT_FALSE(c.graphPrepare);
     EXPECT_EQ(c.optix.optLevel, OptixOptions::OptLevel::O2);
     EXPECT_EQ(c.optix.debugLevel, OptixOptions::DebugLevel::Moderate);
     EXPECT_EQ(c.optix.maxRegisterCount, 0u);
@@ -492,6 +494,7 @@ TEST(JsonChecker, WrongTypesAndValues) {
         {R"({"obb_culling": "on"})", "obb_culling", "is not one of \"auto\", true, false"},
         {R"({"obb_culling": 1})", "obb_culling", "is not one of"},
         {R"({"collapse_root_link_obb": 1})", "collapse_root_link_obb", "true or false"},
+        {R"({"graph_prepare": "yes"})", "graph_prepare", "true or false"},
         {R"({"scene_edges": "all"})", "scene_edges", "is not one of \"auto\", \"unique\", \"loop\""},
         {R"({"verbosity": "trace"})", "verbosity", "is not one of"},
         {R"({"optix": []})", "optix", "must be an object"},
@@ -920,6 +923,11 @@ TEST(JsonOverrides, KeepsOtherFieldsAndPathsExact) {
     EXPECT_EQ(c.numStreams, 2u);
     c.numStreams = orig.numStreams;
     expectSameConfig(c, orig);
+    EXPECT_TRUE(c.graphPrepare); // default
+    applyOverrides(c, "graph_prepare=false");
+    EXPECT_FALSE(c.graphPrepare);
+    c.graphPrepare = orig.graphPrepare;
+    expectSameConfig(c, orig);
     // a relative path in an override is resolved against the working directory
     applyOverrides(c, "curve.spline_weights_dir=some/dir");
     EXPECT_EQ(c.curve.splineWeightsDir, norm(fs::current_path() / "some" / "dir"));
@@ -969,7 +977,7 @@ TEST(JsonDump, CheckerHasEveryFieldInSchemaOrder) {
         top.push_back(item.key());
     }
     EXPECT_EQ(top, (std::vector<std::string>{"mode", "streams", "host_dispatch", "max_batch_size", "max_items_per_check",
-                       "obb_culling", "collapse_root_link_obb", "scene_edges", "verbosity", "optix", "mesh", "ray",
+                       "obb_culling", "collapse_root_link_obb", "scene_edges", "verbosity", "graph_prepare", "optix", "mesh", "ray",
                        "curve"}));
     EXPECT_EQ(j["optix"].size(), 6u);
     EXPECT_EQ(j["mesh"].size(), 3u);
@@ -1005,6 +1013,7 @@ TEST(JsonDump, CheckerRoundTrips) {
     all.collapseRootLinkObb       = false;
     all.sceneEdges                = EdgeSet::Unique;
     all.verbosity                 = LogLevel::Error;
+    all.graphPrepare              = false;
     all.optix                     = OptixOptions::debug();
     all.optix.optLevel            = OptixOptions::OptLevel::O1;
     all.optix.exceptionFlags      = OptixOptions::kExceptionUser | OptixOptions::kExceptionStackOverflow;

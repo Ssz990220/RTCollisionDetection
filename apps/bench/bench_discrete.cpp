@@ -7,6 +7,9 @@
 
 #include <benchmark/benchmark.h>
 
+#include <memory>
+#include <string>
+
 using namespace rtcd;
 
 namespace {
@@ -47,7 +50,17 @@ namespace {
         static bench::DeviceBench b(discreteConfig(Mode::Ray));
         run(state, b);
     }
-} // namespace
+
+    // --rtcd_graph_bench: BM_RAY with CheckerConfig::graphPrepare = false (the default BM_RAY uses graph replay of
+    // each batch's zero / staging copy / prepare()), to compare both in one process. Not an old-stack benchmark.
+    void BM_RAY_NOGRAPH(benchmark::State& state) {
+        static bench::DeviceBench b = [] {
+            CheckerConfig c  = discreteConfig(Mode::Ray);
+            c.graphPrepare   = false;
+            return bench::DeviceBench(c);
+        }();
+        run(state, b);
+    }} // namespace
 
 BENCHMARK(BM_IAS)
     ->RangeMultiplier(2)
@@ -69,6 +82,21 @@ BENCHMARK(BM_RAY)
     ->MinWarmUpTime(4);
 
 int main(int argc, char** argv) {
+    // --rtcd_graph_bench: also register BM_RAY_NOGRAPH (= BM_RAY with graph_prepare = false). Off by default so
+    // benchmark.sh / benchmark.bat outputs keep exactly the old benchmark set.
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--rtcd_graph_bench") {
+            for (int j = i; j + 1 < argc; ++j) argv[j] = argv[j + 1];
+            --argc;
+            benchmark::RegisterBenchmark("BM_RAY_NOGRAPH", BM_RAY_NOGRAPH)
+                ->RangeMultiplier(2)
+                ->Range(1 << 0, 1 << 12)
+                ->Unit(benchmark::kMicrosecond)
+                ->UseRealTime()
+                ->MinWarmUpTime(4);
+            break;
+        }
+    }
     bench::setup(argc, argv);
     benchmark::Initialize(&argc, argv);
     if (benchmark::ReportUnrecognizedArguments(argc, argv)) {

@@ -182,6 +182,10 @@ namespace rtcd {
         std::optional<EdgeSet> sceneEdges;
         LogLevel verbosity = LogLevel::Warning;                // [runtime] "verbosity": level of this checker's
                                                                //           messages (sink = the Context's Logger)
+        // [runtime] "graph_prepare": replay the capturable part of a batch (zeroing, staging copy, the backend's
+        // prepare) as one CUDA graph launch per batch; applies only to batches for which the backend reports its
+        // prepare as capturable (Backend::prepareCapturable); never changes results. Added 2026-11-24.
+        bool graphPrepare = true;
         OptixOptions optix = OptixOptions::buildDefault();     // "optix"
         MeshOptions mesh;                                      // "mesh"   (read only when mode == Mesh)
         RayOptions ray;                                        // "ray"    (read only when mode == Ray)

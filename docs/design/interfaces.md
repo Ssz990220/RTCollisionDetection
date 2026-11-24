@@ -18,6 +18,9 @@
 > last one with a small fix in `tests/support/reference_executor.cpp`, no declaration changed). Historical
 > skeleton-stage / Wave-1 material (placeholders, `tests/skeleton`, `debug_box`) is marked as such in sections 6 and 8;
 > section 10 records which open questions are settled by measurement.
+> **graph_prepare / prepareCapturable added 2026-11-24** (Track G0, authorized by the owner through main):
+> `CheckerConfig::graphPrepare` (JSON `graph_prepare`, default true, 3.7 / 7.1) and the virtual
+> `Backend::prepareCapturable(itemCount)` with a default of false (3.10, section 4 step 7); no other declaration changed.
 > From here on the contract -- every header under `include/rtcd/` (public and `internal/`) and this document --
 > is changed only by main. **Change procedure:** a module agent that needs a header change does not make it; it sends main a request naming the file, the exact declaration (old and new
 > text) and the reason. Main decides, applies the change in one commit to the contract, updates this document in
@@ -202,7 +205,9 @@ Purpose: all checker options as plain data, each field documented with default, 
 quadratic, none for linear and cubic, as the old `curveDefaultGeometryFlags` since `4ee064e`), spline weights dir). Top level: mode, `numStreams = 4`,
 `hostDispatch = ThreadPerStream`, `maxBatchSize = 1024`, `maxItemsPerCheck = 8192`, `obbCulling = Auto`
 (On for Mesh / Ray, Off for curves), `collapseRootLinkObb = true` (old `SKIP_BASE`), `sceneEdges = auto`
-(Unique for Mesh, Loop for curves), verbosity.
+(Unique for Mesh, Loop for curves), verbosity, `graphPrepare = true` (added 2026-11-24: replay the capturable part of
+a batch -- zeroing, staging copy, the backend's prepare -- as one CUDA graph launch per batch, only for batches whose
+backend reports `prepareCapturable`; never changes results; no validate / resolved rule).
 
 `validate()` rules (config-only; all violations reported at once):
 - `numStreams >= 1`; `maxBatchSize >= 1`; `maxItemsPerCheck >= 1`.
@@ -274,7 +279,18 @@ Purpose: the seam between the mode-agnostic detector core and the backends.
 - Result location: `BatchView::hitCounts` (per-stream, zeroed by the core, stable address) is the only result
   location; programs `atomicAdd` per batch-local item; the core copies it to the check result.
 - `Backend`: `mode()`, `programs()`, `beginCheck()` (host only, per check), `prepare()` (per batch),
-  `synchronizesHost(itemCount)` (exact predicate: true iff that prepare blocks the host).
+  `synchronizesHost(itemCount)` (exact predicate: true iff that prepare blocks the host),
+  `prepareCapturable(itemCount)` (added 2026-11-24; virtual with default false, so a backend that does not
+  override it is never captured): true iff that prepare (a) enqueues only plain CUDA work on its stream (no OptiX
+  API call of any kind, no host synchronization, no device allocation) and (b) returns a plan and params that
+  depend only on (stream index, itemCount), so replaying the captured work equals calling prepare again on new
+  contents of the same buffers. Capturable implies not synchronizing (the core treats both true as an internal
+  error). Hard rule, measured on OptiX 9.1 / driver 610.88 (`tests/experiments/graph_capture`): an OptiX call
+  inside a stream capture is silently dropped from the graph (`optixLaunch`: only a 64-byte param copy recorded,
+  the replay traces nothing; `optixAccelBuild`: nothing recorded, or for quadratic curves part of the build, whose
+  replay hits an illegal address) or fails with `OPTIX_ERROR_CUDA_ERROR`, and it leaves the OptiX device context
+  with an invalid internal event (later launches fail with `OPTIX_ERROR_INVALID_VALUE`). Ray: true for every item
+  count it accepts (any hit mode, OBB culling on or off); mesh and curves: false (per-batch AS build).
 - `prepare` contract: GPU work only on its stream; no allocation; no device sync; host block only when
   `synchronizesHost` says so; per-stream state only, so the core may call it concurrently for different stream
   indices; params valid until the next prepare of that stream index.
@@ -360,6 +376,11 @@ Ownership: functions, values. Threading: reentrant. Errors: `IoError`, `ConfigEr
       `hitBuffer`]
    2. D2D copy of the batch's items into stream `s`'s staging buffer (`BatchView::items`). [`movePosesToStream`
       -> `copyBatchToStream`, `CCRobotWrapper.h`]
+   With `graphPrepare` and `backend.prepareCapturable(itemCount)` (and packed items), steps 1 - 3 are one
+   `cudaGraphLaunch` instead: the core captures them once per (stream, itemCount) (`cudaStreamCaptureModeThreadLocal`,
+   on the thread that runs the batch), keeps the plan and params `prepare` returned at capture, re-points the
+   staging-copy node when the source address changes, and keeps at most 8 graphs per stream (oldest evicted; a miss
+   costs ~30 us). `prepare` is then not called for that batch. Steps 4 and 5 stay direct calls.
    3. `plan = backend.prepare({s, stream}, batch)` (mode-specific, section 5). [`fkine` / `update`, `detectOBB`
       (`BBCDRobotMask`), `updateWithMask`, `getHandle`, `getRayInfo`, `getMapIndex` -- spread over
       `detect`, `detectWithOBB`, `detectOBB` and the robot classes]
@@ -478,7 +499,7 @@ sync, see open question Q5.
 | `hitBuffer` per stream, `resultBuffer`, `downloadResult`, `clearResult`    | `BatchView::hitCounts`, checker result buffer, `CheckResult` |
 | `uploadLaunchParams` memcmp cache                                          | detector core, step 7.4 |
 | `warmup(nPoses)`, `prepareRandomData`                                      | `CollisionChecker::warmup()` |
-| `resetGraph`, graph members (never captured)                               | dropped; `synchronizesHost` prepares later graph capture |
+| `resetGraph`, graph members (never captured)                               | dropped; graph capture of steps 7.1 - 7.3 via `CheckerConfig::graphPrepare` + `Backend::prepareCapturable` (2026-11-24) |
 | `resizeHitBuffer`, `getHitBuffer`, `updateASHandle`, `RAYDATAMODE`, `__anyhit__RayData`, `PEROBS` | dropped (Q9) |
 | `PRINTIT`                                                                  | `OptixOptions::printPipelineLog`, `ContextOptions::optixLogLevel`, Logger level |
 | `_DEBUG / DEBUG` (`buildDefault`)                                          | `OptixOptions::buildDefault()`, `ContextOptions::buildDefault()` (inline, per including TU) |
@@ -503,6 +524,7 @@ the C++ structs; enums as strings; relative paths are relative to the file that 
 | `collapse_root_link_obb` | bool | true |
 | `scene_edges` | `"auto" \| "unique" \| "loop"` | `"auto"` |
 | `verbosity` | `"error" \| "warning" \| "info" \| "debug"` | `"warning"` |
+| `graph_prepare` | bool | true |
 | `optix.opt_level` | `"default" \| 0 \| 1 \| 2 \| 3` | `"default"` (Debug build of the app: 0) |
 | `optix.debug_level` | `"default" \| "none" \| "minimal" \| "moderate" \| "full"` | `"default"` (Debug: `"full"`) |
 | `optix.max_register_count` | int >= 0 | 50 |
