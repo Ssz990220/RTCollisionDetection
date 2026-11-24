@@ -1,5 +1,31 @@
+# Editors / IDEs
 .vscode
+.vs/
+.idea/
+
+# Build trees (any generator): build/, build-<name>/, out/
 build
+build-*/
+out/
+CMakeUserPresets.json
+
+# Third-party sources downloaded at configure time (tiny_obj_loader.h)
 3rdparty
+
+# Local data: caches, benchmark results, plots (the small reference data lives in tests/data/)
 /data/
+
+# Python
 *.pyc
+__pycache__/
+.ipynb_checkpoints/
+.venv/
+venv/
+
+# Profiler output
+*.nsys-rep
+*.qdstrm
+
+# Claude Code: agent worktrees and per-user local settings (shared project settings stay tracked)
+.claude/worktrees/
+.claude/settings.local.json
