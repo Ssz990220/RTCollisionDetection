@@ -61,7 +61,7 @@ All on Windows 11, RTX 5080, driver 610.88, CUDA 13.2, OptiX 9.1.0, MSVC 14.52, 
 - At `632b6a5` (both stacks): new_unit 10/10, new_gpu 49/49, old-stack regression 4/4.
 
 **Not verified anywhere:** Linux; GCC/Clang; Debug builds; the Visual Studio generator; robots other than Panda;
-cubic curves (no golden); the Julia plotting scripts on new output; the Python tools merged from master
+cubic curves (no golden); the Python plotting tool `scripts/Benchmark/plots/plot_benchmarks.py` on new output (its parser accepts benchmark names with and without the `/min_warmup_time:` part); the Python tools merged from master
 (`scripts/URDFParser`); `benchmark.sh` end to end.
 
 ## 4. Building on Linux: what to expect
@@ -188,13 +188,111 @@ dominates at small batches (381 of ~520 us per batch of 16).
   BM_IAS is unaffected (its `prepare()` builds the IAS, not capturable): N = 1 / 16 / 1024 at 98.5-99.6 /
   148.6-150.3 / 612.7-614.5 us on and off (separate processes, alternated).
 - **Next (not done):** mesh / curves would need `prepare()` split into a capturable CUDA part and a direct OptiX part
-  (estimated ~10 us per batch for mesh masked, ~4 us for curves); the result copy could go if the programs wrote
-  into the result range.
+  (estimated ~10 us per batch for mesh masked, ~4 us for curves); the result copy is gone for repeated
+  targets since G2 (below).
+
+**Host-time breakdown and call reduction (Track G2, 2026-11-24).** Tool: `tests/experiments/host_breakdown`
+(`rtcd_exp_host_breakdown`: a `DetectorCore` of each benchmark configuration with a `PhaseTrace`
+(`src/detector/phase_trace.h`, off by default: one null-pointer test per mark point) that timestamps every phase of
+`checkDevice` / `checkHost`; traced and untraced checks alternate, so the tracing cost is visible; `--variants`
+alternates several checker configs in one process and compares their flags every repetition;
+`rtcd_exp_transfer_probe`: small transfers by method). Configs: mesh / ray 4 streams, batch 1024; linear<16,16,16>,
+quad<8,16,16> 16 streams, batch 16; N = 1 and 16 are single-batch checks in all four.
+
+Breakdown BEFORE (base `00c8591`), `checkDevice` N = 1, median us over 1500 traced reps (p10 / p90 in
+`bd_base` runs of the G2 report):
+
+| phase | ray | mesh | linear | quad |
+|---|---|---|---|---|
+| entry + argument checks + makeCurrent | 0.2 | 0.2 | 0.2 | 0.2 |
+| wake worker (dispatch -> batch start) | 4.7 | 4.3 | 4.7 | 4.9 |
+| zero hit counters | (graph) | 3.0 | 3.1 | 3.6 |
+| staging copy | (graph) | 3.6 | 3.5 | 3.7 |
+| prepare() / graph launch | 5.8 | 17.7 | 9.4 | 37.3 |
+| params compare / upload | 0.0 | 0.0 | 0.1 | 0.1 |
+| optixLaunch | 9.4 | 8.6 | 8.4 | 8.7 |
+| result copy | 3.3 | 3.2 | 3.2 | 3.2 |
+| join (batch end -> caller resumes) | 4.4 | 4.6 | 4.7 | 4.7 |
+| stream sync (GPU still running; idle-stream sync costs 0.1-0.3) | 4.6 | 42 | 30 | 94 |
+| sync of the unused streams (3 resp. 15) | 0.3 | 0.3 | 1.1 | 1.1 |
+| total | 39.1 | 94.5 | 78.6 | 172.6 |
+
+Host `check()` added: upload 3.2 us, download 24-40 us (!), so N = 1 host checks took 76 (ray) / 122 (mesh) /
+111 (linear) / 205 (quad) us. Mesh and curves at N = 1 are already partly GPU-bound (the sync waits for the GPU);
+at N = 16 the curve checks are GPU-bound (sync 270 / 800 us).
+
+Changes kept (all defaults; flags compared every repetition, 0 mismatches; tests below):
+1. **Single-batch checks on the calling thread** (no worker wake + join): -6 to -18 us per check.
+2. **Packed items read in place** (no staging copy for non-graph batches): mesh N = 1 -5 us, linear N = 256 -7.7%.
+3. **Counting straight into the result range** when a stream's previous batch had the same target (repeated
+   checks into one buffer; params stay identical, ray graphs keyed by the hit-count address): ray N = 1 -7 us.
+4. **Synchronize only the streams that ran batches**: -1 us at 16 streams.
+5. **Host checks without copy-engine transfers** (`mapped_host_transfer`, default on): items packed into a pinned
+   buffer the GPU reads through its mapping, counters written into a pinned buffer by a copy kernel; the ray graph's
+   staging copy is a kernel node. Root cause, `rtcd_exp_transfer_probe`, 64 bytes: H2D copy + kernel 25-61 us vs
+   mapped read 7-8 us; D2H right after GPU work ~20 us more than idle (4.5). Host check, same process: ray N = 1
+   32 vs 68, mesh 87 vs 116, linear 67 vs 108, quad 137 vs 179 us (copy path = `mapped_host_transfer: false`);
+   N = 1024-4096 within 1.5% either way (mesh N = 4096 +1.3%, inside the spread). Large end, mapped vs copy,
+   median us: ray N=1024 289 vs 331, N=4096 934 vs 970; mesh N=1024 585 vs 620, N=4096 912 vs 900; linear
+   N=1024 7003 vs 7044, N=4096 26659 vs 27252; quad N=1024 20511 vs 20461, N=4096 77694 vs 78171. No size threshold.
+6. **Wait on the host for pending legacy-stream work** before issuing a check. A pageable `cudaMemcpy` (as the
+   benchmarks do in their paused region, and as most callers upload device items) returns before its DMA ends;
+   work submitted on the blocking pool streams meanwhile pays a cross-queue dependency of ~15 us on Windows. This
+   is what made the worker hand-off look cheap before change 1: it hid the DMA. One `cudaStreamQuery` +
+   `cudaStreamSynchronize(cudaStreamLegacy)` if not ready: BM_RAY N = 1 45 -> 27 us, BM_IAS N = 1 95 -> 78 us
+   (same build, A/B). **Benchmark-harness note:** without this wait the paused pageable upload spills ~11-14 us
+   into the timed `checkDevice` at N = 1-16 (host_breakdown `--settle 1`, which syncs the device after the upload:
+   ray N = 1 34-38 -> 23.5, mesh N = 1 87-89 -> 75-83 us); the harness is unchanged.
+
+**Re-measure both on Linux** (they are Windows / WDDM findings): `mapped_host_transfer` true vs false
+(`rtcd_exp_host_breakdown --path host --variants "mapped_host_transfer=true/mapped_host_transfer=false"`, N = 1 ..
+4096; on Linux small copies cost ~1 us and mapped PCIe reads may lose at large N), and the legacy-stream wait (it
+has no switch; compare BM_RAY / BM_IAS N = 1 at `a786ba8` and its parent `f165115`). The pool streams must stay
+blocking either way (design doc Q13).
+
+Tried and dropped: caller spin-wait for the workers (join) and worker spin before sleeping (wake): no gain for
+multi-batch checks, +1-3% at some sizes, burns cores; per-batch async D2H of host results into pinned memory
+(copy engine): 3-8 us slower than one download.
+
+Breakdown AFTER (`a786ba8` + tests), same tool, N = 1, median us (device check / host check):
+
+| phase | ray | mesh | linear | quad |
+|---|---|---|---|---|
+| wake / join | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| zero hit counters | (graph) | 2.4 | 2.4 | 2.4 |
+| staging copy | (graph) | 0 | 0 | 0 |
+| prepare() / graph launch | 4.7 | 16.3 | 8.4 | 34.7 |
+| optixLaunch | 8.4 | 8.3 | 8.3 | 8.8 |
+| result copy (device: direct; host: copy kernel) | 0 / 2.9 | 0 / 2.9 | 0 / 2.9 | 0 / 2.9 |
+| stream sync (now mostly GPU time) | 10.1 | 46.9 | 37.1 | 101 |
+| upload / download (host) | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
+| total device / host | 25.3 / 33.5 | 76.0 / 88.1 | 59.6 / 64.5 | 151.9 / 150.5 |
+
+What remains on the host for a single batch: ray 2 calls (graph launch, `optixLaunch`) + sync; mesh 6 (memset,
+3 kernels, IAS build, launch); curves 3-4. Next candidates, not done: a mesh `prepare()` split so memset + its
+3 kernels become one graph launch (contract change, not approved; estimate from the measured costs: memset 2.4 +
+3 kernels ~7.5 us -> graph ~4.7 us, i.e. ~5 us per mesh batch); fusing the mesh backend's transform/mask kernel with
+the OBB overlap kernel (-1 launch, ~2.5 us; needs a bit-identical copy of the SAT test from `src/core`).
+
+Final benchmarks, `rtcd_bench_discrete` / `rtcd_bench_curve`, base `00c8591` vs `a786ba8`, same session, base and
+new alternated, 2 rounds, `--benchmark_min_warmup_time=1 --benchmark_repetitions=3`, median of each, us (ratio new /
+base per round):
+
+| benchmark | N=1 | N=16 | N=256 | N=1024 | N=4096 |
+|---|---|---|---|---|---|
+| BM_IAS base / new | 99.0 / 78.2 (0.79) | 150.2 / 128.1 (0.85) | 310.5 / 289.0 (0.93) | 614.3 / 588.7 (0.96) | 948.4 / 899.3 (0.95) |
+| BM_RAY base / new | 39.6 / 27.2 (0.69) | 47.1 / 34.8 (0.74-0.77) | 107.6 / 95.4 (0.88) | 303.3 / 286.3 (0.94-0.95) | 942.6 / 940.6 (1.00) |
+| BM_LINEAR<16,16,16> | 86.1 / 62.3 (0.72-0.78) | 332.8 / 291.7 (0.88-0.95) | 2266 / 2095 (0.93-0.95) | 7197 / 6977 (0.97) | - |
+| BM_QUAD<8,16,16> | 185.6 / 158.9 (0.86-0.87) | 952.5 / 891.4 (0.94-0.95) | 6133 / 6020 (0.98) | 20371 / 20298 (1.00) | - |
+
+Nothing got slower at any size. With the paused pageable upload's DMA taken out of the timed region entirely
+(`--settle 1`), the remaining difference is ~1.5-2 us (the legacy-stream wait itself): BM_RAY / BM_IAS N = 1 would
+read about 25 / 76 us.
 
 **Ideas not yet tried:** Rocaps intersector for quadratic
 curves (`OPTIX_PRIMITIVE_TYPE_ROUND_QUADRATIC_BSPLINE_ROCAPS`; it intersects a true swept sphere, so results
-would change and need new references); running a single-batch check on the calling thread instead of waking a
-worker; one hit-group record instead of `maxBatchSize * numLinks` identical ones in mesh mode; the fused FK+OBB
+would change and need new references);
+one hit-group record instead of `maxBatchSize * numLinks` identical ones in mesh mode; the fused FK+OBB
 kernel in the ray backend (saves one launch per batch).
 
 ## 6. How to get an old-vs-new comparison on Linux

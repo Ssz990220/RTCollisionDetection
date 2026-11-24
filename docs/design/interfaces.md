@@ -24,6 +24,8 @@
 > **BatchView address rules relaxed 2026-11-24** (Track G2, comment-only, approved by main): items may be read in
 > place, hit counts may be counted into the result range, single-batch checks run on the calling thread (3.7
 > `HostDispatch`, 3.10 `BatchView` / `prepareCapturable` (b), section 4 steps 3, 6, 7, 9; Q3 / Q4 settled).
+> **`CheckerConfig::mappedHostTransfer` added 2026-11-24** (Track G2, approved by main; JSON `mapped_host_transfer`,
+> default true, 3.7 / 7.1; the only declaration change of G2) with the matching `checker.h` comments (3.11).
 > From here on the contract -- every header under `include/rtcd/` (public and `internal/`) and this document --
 > is changed only by main. **Change procedure:** a module agent that needs a header change does not make it; it sends main a request naming the file, the exact declaration (old and new
 > text) and the reason. Main decides, applies the change in one commit to the contract, updates this document in
@@ -211,7 +213,10 @@ issued on the calling thread, which saves the worker wake-up and join, 6-18 us p
 (On for Mesh / Ray, Off for curves), `collapseRootLinkObb = true` (old `SKIP_BASE`), `sceneEdges = auto`
 (Unique for Mesh, Loop for curves), verbosity, `graphPrepare = true` (added 2026-11-24: replay the capturable part of
 a batch -- zeroing, staging copy, the backend's prepare -- as one CUDA graph launch per batch, only for batches whose
-backend reports `prepareCapturable`; never changes results; no validate / resolved rule).
+backend reports `prepareCapturable`; never changes results; no validate / resolved rule), `mappedHostTransfer = true`
+(added 2026-11-24, Track G2: host `check()` lets the GPU read the packed items from, and write the counters to,
+mapped pinned host memory instead of copy-engine uploads / downloads; `checkDevice` unaffected; never changes
+results; no validate / resolved rule; tuned on Windows, to be re-measured on Linux).
 
 `validate()` rules (config-only; all violations reported at once):
 - `numStreams >= 1`; `maxBatchSize >= 1`; `maxItemsPerCheck >= 1`.
@@ -370,42 +375,59 @@ Ownership: functions, values. Threading: reentrant. Errors: `IoError`, `ConfigEr
 1. Validate the view: `n <= maxItemsPerCheck` (`CapacityError`), span size and stride (`InvalidArgument`);
    `n == 0` returns empty results. [new; old silently grew buffers]
 2. Make the Context's device current. [new]
-3. Host input only: one synchronous copy of the `n` items into the checker's input buffer (strided input with
-   `cudaMemcpy2D`). [`CCWrappedRobot::prepareUpdateData` / `CCRayRobot::prepareUpdateData`, `CCRobotWrapper.h`]
+3. Host input only: with `mappedHostTransfer` (default) a host `memcpy` of the `n` items, packed, into the checker's
+   pinned upload buffer, which the GPU then reads in place through its mapping; otherwise one synchronous copy into
+   the checker's device input buffer (strided input with `cudaMemcpy2D`). [`CCWrappedRobot::prepareUpdateData` /
+   `CCRayRobot::prepareUpdateData`, `CCRobotWrapper.h`]
+   3b. (Since 2026-11-24) wait for pending work on the legacy default stream: `cudaStreamQuery(cudaStreamLegacy)`,
+   then `cudaStreamSynchronize` if not ready. With blocking streams that work would be waited for on the device
+   anyway; measured on Windows: ~15 us per check saved when a pageable upload precedes the check. This is why the
+   pool streams stay blocking (Q13). [new]
 4. Batches: `nb = ceil(n / B)`; batch `b` = items `[bB, min(n, (b+1)B))`, stream `b % S`. [`setNCheck`,
    `batchSizeInfo` tuples (frameId, size, start)]
 5. `backend.beginCheck({n, nb})` on the calling thread. [`setNCheck` -> `setBatchCountHint` -> curve
    `applyRefitPolicy`]
-6. Dispatch: `SingleThread`: the calling thread runs step 7 for all batches in order; `ThreadPerStream`: worker
+6. Dispatch: a check with a single batch runs step 7 on the calling thread in both modes (since 2026-11-24).
+   Otherwise `SingleThread`: the calling thread runs step 7 for all batches in order; `ThreadPerStream`: worker
    `s` first makes the Context's device current, then runs step 7 for batches `s, s+S, s+2S, ...` in order (so
    every thread that calls `prepare` has the device current, as step 2 does for the calling thread and
    `beginCheck`); no cross-stream barrier is needed because all mutable
    state is per stream. [`check()`: loop, or `ThreadPool<NSTREAM>` with a barrier after every round of NSTREAM
    batches, `threadPool.h`, `USE_MULTI_THREADING`]
 7. Per batch `b` on stream `s`:
-   1. `cudaMemsetAsync` of `hitCounts[0, itemCount)` of stream `s`. [`detectWithOBB` / `detect`: memset
-      `hitBuffer`]
-   2. D2D copy of the batch's items into stream `s`'s staging buffer (`BatchView::items`). [`movePosesToStream`
+   0. Hit-count target: if the batch's result address (`results + firstItem`) equals the one of stream `s`'s
+      previous batch and the results are device memory, `BatchView::hitCounts` is that result range itself
+      ("direct", no step 5); otherwise stream `s`'s own counter buffer. Host checks with `mappedHostTransfer`
+      (results in pinned host memory) never count directly. [new, 2026-11-24]
+   1. `cudaMemsetAsync` of `hitCounts[0, itemCount)`. [`detectWithOBB` / `detect`: memset `hitBuffer`]
+   2. Packed input, not graph-replayed: no copy, `BatchView::items` = the input at the batch's first item (read in
+      place, since 2026-11-24). Strided input: a 2D copy into stream `s`'s staging buffer. [`movePosesToStream`
       -> `copyBatchToStream`, `CCRobotWrapper.h`]
    With `graphPrepare` and `backend.prepareCapturable(itemCount)` (and packed items), steps 1 - 3 are one
-   `cudaGraphLaunch` instead: the core captures them once per (stream, itemCount) (`cudaStreamCaptureModeThreadLocal`,
-   on the thread that runs the batch), keeps the plan and params `prepare` returned at capture, re-points the
-   staging-copy node when the source address changes, and keeps at most 8 graphs per stream (oldest evicted; a miss
-   costs ~30 us). `prepare` is then not called for that batch. Steps 4 and 5 stay direct calls.
+   `cudaGraphLaunch` instead: the core captures them, with the staging copy done by its own 4-byte-word copy kernel
+   (a kernel node, so the source may be mapped pinned host memory), once per (stream, itemCount, hitCounts address)
+   (`cudaStreamCaptureModeThreadLocal`, on the thread that runs the batch), keeps the plan and params `prepare`
+   returned at capture, re-points the staging-copy kernel node when the source address changes, and keeps at most
+   8 graphs per stream (oldest evicted; a miss costs ~30 us). `prepare` is then not called for that batch. Steps 4
+   and 5 stay direct calls.
    3. `plan = backend.prepare({s, stream}, batch)` (mode-specific, section 5). [`fkine` / `update`, `detectOBB`
       (`BBCDRobotMask`), `updateWithMask`, `getHandle`, `getRayInfo`, `getMapIndex` -- spread over
       `detect`, `detectWithOBB`, `detectOBB` and the robot classes]
    4. If `plan.launch`: copy `plan.params` into stream `s`'s parameter buffer unless byte-identical to its last
       upload; `optixLaunch(pipeline, stream, paramsBuf, plan.paramsBytes, sbt(raygen = plan.raygen), w, h, d)`.
       [`uploadLaunchParams` (memcmp cache), `optixLaunch` in `detect` / `detectWithOBB`]
-   5. D2D copy `hitCounts[0, itemCount)` -> result buffer at `firstItem`. [`check()`: `cudaMemcpyAsync` into
-      `resultBuffer + start`]
-8. Join workers (rethrow the first exception after draining), then synchronize the checker's `S` streams.
-   [`CUDA_SYNC_CHECK()` = `cudaDeviceSynchronize`]
-9. Host results: download `n` counters (pinned buffer), `collides[i] = count > 0`. [`downloadResult`;
-   regression computes `raw[i] > 0`]
+   5. Unless direct: copy `hitCounts[0, itemCount)` -> results at `firstItem` (D2D `cudaMemcpyAsync`; host checks
+      with `mappedHostTransfer`: the copy kernel writing the mapped pinned download buffer). [`check()`:
+      `cudaMemcpyAsync` into `resultBuffer + start`]
+8. Join workers (rethrow the first exception after draining), then synchronize the streams that ran batches of
+   this check (`min(S, nb)`; the others are idle). [`CUDA_SYNC_CHECK()` = `cudaDeviceSynchronize`]
+9. Host results: with `mappedHostTransfer` the counters are already in the pinned buffer; otherwise download the
+   `n` counters into it; `collides[i] = count > 0`. [`downloadResult`; regression computes `raw[i] > 0`]
 
-`checkDevice` skips 3 and 9 (step 7.2 copies from the caller's buffer, 7.5 writes the caller's buffer).
+`checkDevice` skips 3 and 9 (step 7.2 reads the caller's buffer, 7.0 / 7.5 write the caller's buffer).
+Why the host path avoids copy engines (Track G2, `tests/experiments/host_breakdown/transfer_probe.cu`, Windows 11 /
+RTX 5080): a 64-byte H2D copy followed by a kernel took 25-61 us until done, the same read by a kernel through the
+mapping 7-8 us; a D2H copy right after GPU work ~20 us more than in isolation (4.5 us).
 
 ## 5. What each backend does in `prepare()`
 
@@ -536,6 +558,7 @@ the C++ structs; enums as strings; relative paths are relative to the file that 
 | `scene_edges` | `"auto" \| "unique" \| "loop"` | `"auto"` |
 | `verbosity` | `"error" \| "warning" \| "info" \| "debug"` | `"warning"` |
 | `graph_prepare` | bool | true |
+| `mapped_host_transfer` | bool | true |
 | `optix.opt_level` | `"default" \| 0 \| 1 \| 2 \| 3` | `"default"` (Debug build of the app: 0) |
 | `optix.debug_level` | `"default" \| "none" \| "minimal" \| "moderate" \| "full"` | `"default"` (Debug: `"full"`) |
 | `optix.max_register_count` | int >= 0 | 50 |
@@ -814,9 +837,13 @@ The entries below keep their original text; the "Settled" lines refer to this pa
   pipeline, parity.
 - **Q3 Per-stream hit buffer + D2D copy into the result** (chosen, old behaviour, stable addresses for later graph
   capture) vs writing directly into the result buffer at `firstItem` (saves one copy per batch, but the params then
-  change every batch, defeating the upload cache). Recommendation: keep; revisit with CUDA graphs.
+  change every batch, defeating the upload cache). Recommendation: keep; revisit with CUDA graphs. **Settled
+  2026-11-24 (G2):** both, chosen per batch: direct when the stream's previous batch targeted the same address
+  (params stay identical), else the per-stream buffer + copy; ray N=1 checkDevice -7 us.
 - **Q4 Per-batch staging copy of the items** (chosen, old `movePosesToStream`) vs pointing `BatchView::items` into
-  the input buffer. Same trade-off as Q3. Recommendation: keep for parity.
+  the input buffer. Same trade-off as Q3. Recommendation: keep for parity. **Settled 2026-11-24 (G2):** packed
+  input is read in place for every non-graph batch (no backend puts the items pointer in its params); graph
+  batches keep the staging copy. Mesh N=1 -5 us, linear N=256 -7.7%.
 - **Q5 Curve OBB culling.** The old curve OBB path looks inconsistent: after compaction the GAS primitive indices
   are 0..maskCnt-1 but the any-hit still maps them through the uncompacted segment -> pose map
   (`batchOptixCurveRobot::getMapIndex` returns the template); cubic OBB throws "not implemented". It is not covered
@@ -847,7 +874,13 @@ The entries below keep their original text; the "Settled" lines refer to this pa
   loader threw on any non-watertight mesh even when loop edges were unused). Memory cost: one more ray buffer.
 - **Q13 Stream flags.** Pool streams use default flags as before; `cudaStreamNonBlocking` would be safe (the library
   never uses the legacy default stream) but changes behaviour for users mixing default-stream work. Recommendation:
-  keep default until measured.
+  keep default until measured. **Settled 2026-11-24 (G2): the pool streams must stay blocking.** A caller's pageable
+  `cudaMemcpy` of the items on the default stream returns before its DMA ends and must be ordered before the check
+  reads its input; blocking streams give that ordering. Each check first waits for pending work on the legacy
+  default stream (query, then synchronize if not ready); with blocking streams that work would be waited for on the
+  device anyway; measured on Windows: ~15 us per check saved when a pageable upload precedes the check (BM_RAY N=1
+  45 -> 27 us, BM_IAS N=1 95 -> 78 us). Making the streams non-blocking would need another way to order such
+  uploads; tested by `tests/detector/test_address_rules.cpp` (`AddressRules.NewItemsRightAfterPageableUpload`).
 - **Q14 Final synchronization** is per checker stream instead of `cudaDeviceSynchronize`, so independent checkers do
   not wait for each other. Same semantics for one checker.
 - **Q15 Spline weights home.** `RTCD/data/weights` disappears with the old stack. Chosen default in the JSON

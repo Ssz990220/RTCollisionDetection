@@ -133,6 +133,42 @@ TEST_P(AddressRules, FlagsMatchGoldenForEveryAddressPattern) {
     }
 }
 
+// A check issued right after a pageable cudaMemcpy upload of NEW items into the same device buffer (legacy default
+// stream; the copy returns before its DMA ends) must see the new items: the pool streams are blocking and the core
+// waits for pending legacy-stream work before issuing (rtcd/context.h stream flags, design doc Q13). Alternating
+// two item sets makes an ordering bug visible as flags of the previous set.
+TEST_P(AddressRules, NewItemsRightAfterPageableUpload) {
+    const ModeEnv e     = makeEnv(GetParam());
+    const std::size_t N = support::LegacyHarness::regressionItems;
+    std::vector<float> rotated(e.inputs.size());
+    support::Flags goldenB(N);
+    for (std::size_t i = 0; i < N; ++i) {
+        const std::size_t j = (i + 1000) % N;
+        std::copy_n(e.inputs.begin() + std::ptrdiff_t(j * e.fpi), e.fpi, rotated.begin() + std::ptrdiff_t(i * e.fpi));
+        goldenB[i] = e.golden[j];
+    }
+    ctx()->makeCurrent();
+    DeviceBuffer in(N * e.fpi * sizeof(float));
+    DeviceBuffer hits(N * sizeof(std::uint32_t));
+    for (HostDispatch dispatch : {HostDispatch::SingleThread, HostDispatch::ThreadPerStream}) {
+        CheckerConfig c = e.setup.checker;
+        c.hostDispatch  = dispatch;
+        CollisionChecker checker(ctx(), c, e.robot, e.scene);
+        const std::size_t B = checker.config().maxBatchSize, S = checker.config().numStreams;
+        for (std::size_t n : {std::size_t(1), std::size_t(16), std::min(B * S, N), N}) {
+            for (int rep = 0; rep < 12; ++rep) {
+                const bool a = rep % 2 == 0;
+                in.upload((a ? e.inputs : rotated).data(), n * e.fpi * sizeof(float)); // pageable cudaMemcpy
+                checker.checkDevice(DeviceItems{in.ptr(), n, 0}, DeviceSpan<std::uint32_t>{hits.ptr(), n});
+                std::vector<std::uint32_t> h(n);
+                hits.download(h.data(), n * sizeof(std::uint32_t));
+                const auto d = support::diffFlags(support::flagsFromCounts(h), a ? e.golden : goldenB, n);
+                ASSERT_EQ(d.differing, 0u) << "n " << n << " rep " << rep << " dispatch " << int(dispatch);
+            }
+        }
+    }
+}
+
 INSTANTIATE_TEST_SUITE_P(AllModes, AddressRules,
     ::testing::Values("regression_ias.json", "regression_ray.json", "regression_linear.json", "regression_quad.json"),
     [](const ::testing::TestParamInfo<const char*>& i) {
