@@ -1,0 +1,4 @@
+# Benchmark plotting tool (plot_benchmarks.py): pip install -r scripts/Benchmark/plots/requirements.txt
+matplotlib>=3.7
+numpy
+pyyaml

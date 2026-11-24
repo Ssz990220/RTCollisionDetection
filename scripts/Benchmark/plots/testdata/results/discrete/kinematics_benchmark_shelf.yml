@@ -1,0 +1,15 @@
+Batch Size:
+- 64
+- 16
+- 4
+- 1
+Collision Checking:
+- 0.001837917
+- 0.00069644
+- 0.000263902
+- 0.0001
+robot:
+- franka.yml
+- franka.yml
+- franka.yml
+- franka.yml
