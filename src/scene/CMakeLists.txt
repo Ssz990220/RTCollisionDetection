@@ -1,4 +1,5 @@
-# rtcd_scene: obstacles (SceneDesc -> device meshes), scene GAS, edge rays.
+# rtcd_scene (Wave 1 c): include/rtcd/scene.h -- Scene: per-obstacle triangle GAS + IAS, both edge-ray sets,
+# obstacle OBBs (built with rtcd_geometry and internal/accel.h of rtcd_core).
 add_library(rtcd_scene STATIC
   placeholder.cpp
 )
