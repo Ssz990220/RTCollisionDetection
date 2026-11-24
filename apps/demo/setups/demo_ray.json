@@ -1,0 +1,6 @@
+{
+  "checker": { "mode": "ray", "streams": 4, "max_batch_size": 1024, "max_items_per_check": 4096,
+               "obb_culling": true },
+  "scene": "../../../configs/scenes/shelf_dense.json",
+  "robot": "../../../configs/robots/panda.json"
+}
