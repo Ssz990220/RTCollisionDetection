@@ -1,0 +1,1 @@
+{ "checker": "../checker_linear.json", "scene": "../scenes/shelf.json", "robot": "../robots/panda.json" }
