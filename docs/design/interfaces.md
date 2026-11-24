@@ -26,6 +26,8 @@
 > `HostDispatch`, 3.10 `BatchView` / `prepareCapturable` (b), section 4 steps 3, 6, 7, 9; Q3 / Q4 settled).
 > **`CheckerConfig::mappedHostTransfer` added 2026-11-24** (Track G2, approved by main; JSON `mapped_host_transfer`,
 > default true, 3.7 / 7.1; the only declaration change of G2) with the matching `checker.h` comments (3.11).
+> **`Backend::prepareSplit` / `prepareCompute` / `prepareFinish` added 2026-11-24** (Track G3, approved by main;
+> three virtuals with inline defaults, additive): 3.10, section 4 step 7, section 5 (mesh).
 > From here on the contract -- every header under `include/rtcd/` (public and `internal/`) and this document --
 > is changed only by main. **Change procedure:** a module agent that needs a header change does not make it; it sends main a request naming the file, the exact declaration (old and new
 > text) and the reason. Main decides, applies the change in one commit to the contract, updates this document in
@@ -307,6 +309,20 @@ Purpose: the seam between the mode-agnostic detector core and the backends.
   replay hits an illegal address) or fails with `OPTIX_ERROR_CUDA_ERROR`, and it leaves the OptiX device context
   with an invalid internal event (later launches fail with `OPTIX_ERROR_INVALID_VALUE`). Ray: true for every item
   count it accepts (any hit mode, OBB culling on or off); mesh and curves: false (per-batch AS build).
+- `prepareSplit(itemCount)` (added 2026-11-24, G3; virtual, default false) with `prepareCompute(stream, batch)`
+  (default: nothing) and `prepareFinish(stream, batch)` (default: calls `prepare`): true iff `prepare` of that
+  batch equals `prepareCompute(); return prepareFinish();`, where `prepareCompute` enqueues only plain CUDA work
+  (rule (a) of `prepareCapturable`) and does the same work for the same (stream index, itemCount, items address,
+  hit-count address), and `prepareFinish` does the rest (AS build / refit, params, plan; plain CUDA work and OptiX
+  calls, its stream only), called directly for every batch, never inside a capture. On a replay `prepareCompute`'s
+  host code does not run, so it must have no host-side effect anything later relies on; `prepareFinish` sets
+  everything from its arguments. Split implies not synchronizing and not capturable (internal error otherwise). A
+  backend that returns true overrides both. With `graphPrepare` the core captures "zero, staging copy (kernel
+  node), `prepareCompute`" once per (stream, itemCount, hit-count address) -- the staging address is per stream,
+  so the key covers every address the captured work reads -- replays it and then calls `prepareFinish`; the
+  capture lives in one function that ends it on every path, and a per-stream "capturing" flag is checked before
+  every `prepareFinish`, direct `prepare` and `optixLaunch`. Mesh: true below `mesh.compactionMinPoses` items
+  (masked path and OBB-off path); ray (already capturable) and curves: false.
 - `prepare` contract: GPU work only on its stream; no allocation; no device sync; host block only when
   `synchronizesHost` says so; per-stream state only, so the core may call it concurrently for different stream
   indices; params valid until the next prepare of that stream index.
@@ -409,7 +425,9 @@ Ownership: functions, values. Threading: reentrant. Errors: `IoError`, `ConfigEr
    (`cudaStreamCaptureModeThreadLocal`, on the thread that runs the batch), keeps the plan and params `prepare`
    returned at capture, re-points the staging-copy kernel node when the source address changes, and keeps at most
    8 graphs per stream (oldest evicted; a miss costs ~30 us). `prepare` is then not called for that batch. Steps 4
-   and 5 stay direct calls.
+   and 5 stay direct calls. With `graphPrepare` and `backend.prepareSplit(itemCount)` (packed items; G3) the graph
+   holds steps 1, 2 and `prepareCompute`, keyed the same way, and step 3 is `plan = backend.prepareFinish(...)`, a
+   direct call after the graph launch.
    3. `plan = backend.prepare({s, stream}, batch)` (mode-specific, section 5). [`fkine` / `update`, `detectOBB`
       (`BBCDRobotMask`), `updateWithMask`, `getHandle`, `getRayInfo`, `getMapIndex` -- spread over
       `detect`, `detectWithOBB`, `detectOBB` and the robot classes]
@@ -450,6 +468,12 @@ for culled instances (no host round trip), IAS BUILD over `itemCount * numLinks`
 `linkPosesAndObbs` (the old `update()` also used the fused kernel), write transforms (park transform for unused
 slots), IAS UPDATE (refit) over all `maxBatchSize * numLinks`. Params: traversable = IAS, edges =
 `scene.edgeRays(sceneEdges)`, width = edge count.
+Since G3 (2026-11-24): on the masked path `obbOverlapCounts` and the transform / mask write are one kernel
+(`writeInstanceTransformsAndOverlapMasks`, the same SAT device code via `src/core/obb_sat.cuh`, no count buffer;
+the compaction path keeps the count kernel). Below `compactionMinPoses` items (masked and OBB-off paths)
+`prepareSplit` is true: `prepareCompute` = `linkPosesAndObbs` + the instance kernel, `prepareFinish` = IAS
+BUILD / UPDATE + params + plan (every params field set there). OBB-off batches of >= `compactionMinPoses` items
+stay unsplit (at 1024 items the graph replay measured +1.9%).
 
 **Ray (g)** [old `batchRayRobot.h`, `CCRay.cu`]. Construction: robot rays = every link's `uniqueEdges` in link
 order (origin, target), ray -> link map, link-OBB template; per stream: link poses, OBBs, link mask; an all-ones

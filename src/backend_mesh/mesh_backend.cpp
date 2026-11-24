@@ -26,7 +26,14 @@
 //     else IAS BUILD over the survivors, primToItem = compacted map.
 //   * itemCount < mesh.compactionMinPoses ("masked path", no host round trip): transforms written with
 //     visibility mask 0 for culled instances, IAS BUILD over all itemCount * numLinks instances, primToItem =
-//     template map. Always launches.
+//     template map. Always launches. Since G3 (2026-11-24) the overlap test and the instance write are one kernel
+//     (mesh_detail::writeInstanceTransformsAndOverlapMasks, the SAT code of internal::obbOverlapCounts shared via
+//     src/core/obb_sat.cuh), so the masked path issues no count buffer.
+//
+// Backend::prepareSplit (G3): below compactionMinPoses items (masked path, and the OBB-off path) prepare() =
+// prepareCompute() (FK + link OBBs + instance kernel: plain CUDA work, graph-replayed by the core with
+// graph_prepare) + prepareFinish() (IAS build / refit, params, plan; every params field is set there, from the
+// arguments, so a replay that skips prepareCompute()'s host code changes nothing).
 #include <rtcd/backend.h>
 #include <rtcd/device_buffer.h>
 #include <rtcd/errors.h>
@@ -99,8 +106,24 @@ namespace rtcd {
             bool synchronizesHost(std::uint32_t itemCount) const noexcept override {
                 return obbCulling_ && itemCount >= compactionMinPoses_;
             }
+            // Split (G3) below mesh.compactionMinPoses items: the masked path (OBB culling on) and the OBB-off path.
+            // prepareCompute = FK + link OBBs + instance transforms / masks (kernels only); prepareFinish = IAS build
+            // / refit + params + plan. Measured (RTX 5080 / Windows, graph_prepare on vs off): -1.6 to -4.8 us per
+            // batch below 128 items; OBB off at 1024 items +1.9% (the graph's staging copy instead of reading the
+            // items in place), so larger OBB-off batches stay unsplit.
+            bool prepareSplit(std::uint32_t itemCount) const noexcept override {
+                return itemCount >= 1 && itemCount <= maxBatchSize_ && itemCount < compactionMinPoses_;
+            }
+            void prepareCompute(const StreamContext& stream, const BatchView& batch) override;
+            LaunchPlan prepareFinish(const StreamContext& stream, const BatchView& batch) override;
 
         private:
+            StreamState& checkedState(const StreamContext& stream, const BatchView& batch, const char* fn);
+            // The kernels of a split batch (no host-side state is touched: replays do not run this host code).
+            void computeKernels(StreamState& s, const BatchView& batch);
+            // The OptiX part of a split batch and the params / plan, from the arguments alone.
+            LaunchPlan finishSplit(StreamState& s, const BatchView& batch);
+            LaunchPlan finalPlan(StreamState& s, const BatchView& batch, DevicePtr primToItem);
             void buildIas(StreamState& s, DevicePtr instances, std::uint32_t count, OptixBuildOperation op);
             void drain() noexcept;
 
@@ -350,94 +373,133 @@ namespace rtcd {
             s.ias = handle;
         }
 
-        LaunchPlan MeshBackend::prepare(const StreamContext& stream, const BatchView& batch) {
+        StreamState& MeshBackend::checkedState(
+            const StreamContext& stream, const BatchView& batch, const char* fn) {
             // ---- caller errors first (nothing enqueued yet) ----
             if (stream.index >= streams_.size()) {
-                throw InvalidArgument("MeshBackend::prepare: stream index " + std::to_string(stream.index) + " >= "
-                                      + std::to_string(streams_.size()));
+                throw InvalidArgument(std::string("MeshBackend::") + fn + ": stream index " + std::to_string(stream.index)
+                                      + " >= " + std::to_string(streams_.size()));
             }
             StreamState& s = streams_[stream.index];
             if (stream.stream != s.stream) {
-                throw InvalidArgument("MeshBackend::prepare: stream " + std::to_string(stream.index)
+                throw InvalidArgument(std::string("MeshBackend::") + fn + ": stream " + std::to_string(stream.index)
                                       + " is not the stream given at construction");
             }
             const std::uint32_t n = batch.itemCount;
             if (n == 0 || n > maxBatchSize_) {
-                throw CapacityError("MeshBackend::prepare: batch of " + std::to_string(n) + " items (1 .. max_batch_size "
-                                        + std::to_string(maxBatchSize_) + ")",
+                throw CapacityError(std::string("MeshBackend::") + fn + ": batch of " + std::to_string(n)
+                                        + " items (1 .. max_batch_size " + std::to_string(maxBatchSize_) + ")",
                     "max_batch_size", n, maxBatchSize_);
             }
             const std::size_t dof = robot_->dof();
             if (batch.items.count < std::size_t(n) * dof || batch.hitCounts.count < n) {
-                throw InvalidArgument("MeshBackend::prepare: batch views too small for " + std::to_string(n) + " items");
+                throw InvalidArgument(std::string("MeshBackend::") + fn + ": batch views too small for "
+                                      + std::to_string(n) + " items");
             }
+            return s;
+        }
 
+        void MeshBackend::computeKernels(StreamState& s, const BatchView& batch) {
+            const std::uint32_t n    = batch.itemCount;
             const std::uint32_t nIns = n * numLinks_;
             const DeviceSpan<float> linkPoses{s.linkPoses.ptr(), std::size_t(nIns) * kTransformFloats};
             const DeviceSpan<Obb> linkObbs{s.linkObbs.ptr(), nIns};
-
             // Fused FK + link OBBs (old fkineOBB = batchFkineAdjOBB; the old OBB-off update() used it too).
             internal::linkPosesAndObbs(kinRef_, batch.items, n, obbTemplates_.span<const Obb>(), linkPoses, linkObbs, s.stream);
-
-            LaunchPlan plan;
-            s.params.hitCounts = batch.hitCounts.ptr;
-
             if (!obbCulling_) {
                 // Old detect(): update = fkineOBB + updateIAS: transforms of the batch, park transform for the unused
-                // slots of a partial batch, refit of the IAS over all instances. Visibility masks stay 255.
+                // slots of a partial batch (the IAS refit in finishSplit covers all instances). Masks stay 255.
                 mesh_detail::writeInstanceTransformsParked(s.instances.ptr(), s.linkPoses.ptr(), nIns, maxInstances_, park_, s.stream);
-                buildIas(s, s.instances.ptr(), maxInstances_, OPTIX_BUILD_OPERATION_UPDATE);
-                s.params.primToItem = itemMapTemplate_.ptr();
             } else {
-                // Old detectOBB (BBCDRobotMask): per link-instance overlap count with the obstacle OBBs.
-                const DeviceSpan<std::uint32_t> counts{s.obbCounts.ptr(), nIns};
-                internal::obbOverlapCounts(linkObbs, scene_->obbs(), counts, s.stream);
-
-                if (n >= compactionMinPoses_) {
-                    // Compaction path (one host sync).
-                    mesh_detail::writeInstanceTransformsAndMasks(s.instances.ptr(), s.linkPoses.ptr(), 0, nIns, s.stream);
-                    const std::array<internal::CompactArray, 2> arrays{
-                        internal::CompactArray{s.compactInstances.ptr(), s.instances.ptr(),
-                            static_cast<std::uint32_t>(sizeof(OptixInstance))},
-                        internal::CompactArray{s.compactMap.ptr(), itemMapTemplate_.ptr(),
-                            static_cast<std::uint32_t>(sizeof(std::uint32_t))},
-                    };
-                    internal::compactByFlags(arrays, DeviceSpan<const std::uint32_t>(counts), s.compactCount.ptr(),
-                        s.compactScratch.span<std::byte>(), s.stream);
-                    s.compactCount.downloadAsync(s.hostCount.data(), sizeof(std::uint32_t), s.stream);
-                    RTCD_CUDA_CHECK(cudaStreamSynchronize(s.stream));
-                    const std::uint32_t survivors = s.hostCount.as<std::uint32_t>()[0];
-                    if (survivors == 0) {
-                        plan.launch      = false; // nothing can hit; hit counts stay 0
-                        plan.traversable = s.ias;
-                        plan.width       = edges_->count;
-                        plan.params      = &s.params;
-                        plan.paramsBytes = sizeof(EdgeRayParams);
-                        return plan;
-                    }
-                    buildIas(s, s.compactInstances.ptr(), survivors, OPTIX_BUILD_OPERATION_BUILD);
-                    s.params.primToItem = s.compactMap.ptr();
-                } else {
-                    // Masked path (no host round trip): culled instances get visibility mask 0.
-                    mesh_detail::writeInstanceTransformsAndMasks(
-                        s.instances.ptr(), s.linkPoses.ptr(), s.obbCounts.ptr(), nIns, s.stream);
-                    buildIas(s, s.instances.ptr(), nIns, OPTIX_BUILD_OPERATION_BUILD);
-                    s.params.primToItem = itemMapTemplate_.ptr();
-                }
+                // Masked path (old detectOBB + updateWithMask V3, fused): culled instances get visibility mask 0. The
+                // overlap decision is internal::obbOverlapCounts' (shared SAT code), without the count buffer.
+                mesh_detail::writeInstanceTransformsAndOverlapMasks(s.instances.ptr(), s.linkPoses.ptr(),
+                    DeviceSpan<const Obb>{linkObbs.ptr, nIns}, scene_->obbs(), s.stream);
             }
+        }
 
+        LaunchPlan MeshBackend::finishSplit(StreamState& s, const BatchView& batch) {
+            if (!obbCulling_) {
+                buildIas(s, s.instances.ptr(), maxInstances_, OPTIX_BUILD_OPERATION_UPDATE);
+            } else {
+                buildIas(s, s.instances.ptr(), batch.itemCount * numLinks_, OPTIX_BUILD_OPERATION_BUILD);
+            }
+            return finalPlan(s, batch, itemMapTemplate_.ptr());
+        }
+
+        LaunchPlan MeshBackend::finalPlan(StreamState& s, const BatchView& batch, DevicePtr primToItem) {
+            // Every params field is set here, from the arguments and the stream's IAS (prepareCompute sets none).
+            s.params.hitCounts    = batch.hitCounts.ptr;
+            s.params.primToItem   = primToItem;
             s.params.traversable  = s.ias;
             s.params.edgeVertices = edges_->vertices.ptr;
             s.params.edgeCount    = edges_->count;
-            plan.launch           = true;
-            plan.traversable      = s.ias;
-            plan.width            = edges_->count;
-            plan.height           = 1;
-            plan.depth            = 1;
-            plan.params           = &s.params;
-            plan.paramsBytes      = sizeof(EdgeRayParams);
-            plan.raygen           = 0;
+            LaunchPlan plan;
+            plan.launch      = true;
+            plan.traversable = s.ias;
+            plan.width       = edges_->count;
+            plan.height      = 1;
+            plan.depth       = 1;
+            plan.params      = &s.params;
+            plan.paramsBytes = sizeof(EdgeRayParams);
+            plan.raygen      = 0;
             return plan;
+        }
+
+        void MeshBackend::prepareCompute(const StreamContext& stream, const BatchView& batch) {
+            StreamState& s = checkedState(stream, batch, "prepareCompute");
+            if (!prepareSplit(batch.itemCount)) {
+                throw InvalidArgument("MeshBackend::prepareCompute: batch of " + std::to_string(batch.itemCount)
+                                      + " items is not split (prepareSplit() is false)");
+            }
+            computeKernels(s, batch);
+        }
+
+        LaunchPlan MeshBackend::prepareFinish(const StreamContext& stream, const BatchView& batch) {
+            StreamState& s = checkedState(stream, batch, "prepareFinish");
+            if (!prepareSplit(batch.itemCount)) {
+                throw InvalidArgument("MeshBackend::prepareFinish: batch of " + std::to_string(batch.itemCount)
+                                      + " items is not split (prepareSplit() is false)");
+            }
+            return finishSplit(s, batch);
+        }
+
+        LaunchPlan MeshBackend::prepare(const StreamContext& stream, const BatchView& batch) {
+            StreamState& s        = checkedState(stream, batch, "prepare");
+            const std::uint32_t n = batch.itemCount;
+            if (!synchronizesHost(n)) {
+                // Masked or OBB-off path (prepareSplit() covers these below compactionMinPoses items).
+                computeKernels(s, batch);
+                return finishSplit(s, batch);
+            }
+
+            // Compaction path (OBB culling on, n >= compactionMinPoses): one host sync.
+            const std::uint32_t nIns = n * numLinks_;
+            const DeviceSpan<float> linkPoses{s.linkPoses.ptr(), std::size_t(nIns) * kTransformFloats};
+            const DeviceSpan<Obb> linkObbs{s.linkObbs.ptr(), nIns};
+            internal::linkPosesAndObbs(kinRef_, batch.items, n, obbTemplates_.span<const Obb>(), linkPoses, linkObbs, s.stream);
+            // Old detectOBB (BBCDRobotMask): per link-instance overlap count with the obstacle OBBs.
+            const DeviceSpan<std::uint32_t> counts{s.obbCounts.ptr(), nIns};
+            internal::obbOverlapCounts(linkObbs, scene_->obbs(), counts, s.stream);
+            mesh_detail::writeInstanceTransformsAndMasks(s.instances.ptr(), s.linkPoses.ptr(), 0, nIns, s.stream);
+            const std::array<internal::CompactArray, 2> arrays{
+                internal::CompactArray{s.compactInstances.ptr(), s.instances.ptr(),
+                    static_cast<std::uint32_t>(sizeof(OptixInstance))},
+                internal::CompactArray{s.compactMap.ptr(), itemMapTemplate_.ptr(),
+                    static_cast<std::uint32_t>(sizeof(std::uint32_t))},
+            };
+            internal::compactByFlags(arrays, DeviceSpan<const std::uint32_t>(counts), s.compactCount.ptr(),
+                s.compactScratch.span<std::byte>(), s.stream);
+            s.compactCount.downloadAsync(s.hostCount.data(), sizeof(std::uint32_t), s.stream);
+            RTCD_CUDA_CHECK(cudaStreamSynchronize(s.stream));
+            const std::uint32_t survivors = s.hostCount.as<std::uint32_t>()[0];
+            if (survivors == 0) {
+                LaunchPlan plan  = finalPlan(s, batch, itemMapTemplate_.ptr());
+                plan.launch      = false; // nothing can hit; hit counts stay 0
+                return plan;
+            }
+            buildIas(s, s.compactInstances.ptr(), survivors, OPTIX_BUILD_OPERATION_BUILD);
+            return finalPlan(s, batch, s.compactMap.ptr());
         }
     } // namespace
 

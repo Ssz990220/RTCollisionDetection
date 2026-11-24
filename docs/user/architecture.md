@@ -64,6 +64,11 @@ The `Backend` contract, in short (full text in `backend.h`):
   batch-local item i to `hitCounts[i]` with `atomicAdd`, the only result location;
 - failures throw `rtcd::Error`; the core drains all streams and rethrows on the calling thread.
 
+Split prepare (since 2026-11-24, G3): a backend may also report `prepareSplit(itemCount)`: its `prepare()` is
+then `prepareCompute()` (plain CUDA work, which the core captures with the zeroing and staging copy and replays
+like a capturable batch) followed by `prepareFinish()` (the acceleration-structure build and the plan, a direct call
+after the graph launch, never inside a capture). The mesh backend splits below `mesh.compaction_min_poses` items.
+
 CUDA graph replay (`graph_prepare`, default on, since 2026-11-24): a backend may report
 `prepareCapturable(itemCount)` -- its `prepare()` issues only plain CUDA work and its plan / params depend only on
 (stream, item count). For such batches the core captures "zero hit counts, staging copy, `prepare()`" once per
@@ -71,7 +76,7 @@ CUDA graph replay (`graph_prepare`, default on, since 2026-11-24): a backend may
 (the staging copy is the core's copy kernel, re-pointed per batch; at most 8 graphs per stream); `optixLaunch` and the result copy stay direct calls. Only the
 ray backend reports it: OptiX calls cannot be captured (an `optixLaunch` / `optixAccelBuild` inside a capture is
 dropped from the graph and corrupts the OptiX context, measured with `tests/experiments/graph_capture`), and mesh /
-curves build an acceleration structure in every `prepare()`.
+curves build an acceleration structure in every `prepare()`; mesh therefore uses the split form described above.
 
 ## Where to add a mode
 1. Contract (through main, since the headers are frozen): a `Mode` enumerator in `include/rtcd/types.h`, its

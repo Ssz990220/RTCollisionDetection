@@ -856,6 +856,190 @@ TEST_P(CoreTest, CapturableAndSynchronizingIsAnInternalError) {
     }
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Backend::prepareSplit (G3): "zero + staging copy + prepareCompute()" graph-replayed, prepareFinish() direct
+// ---------------------------------------------------------------------------------------------------------------
+
+TEST_P(CoreTest, SplitComputeOncePerKeyFinishEveryBatchNeverCapturing) {
+    FakeBackend* fake = nullptr;
+    FakeOptions o;
+    o.addValue       = 7;
+    o.splitThreshold = 1;
+    auto core        = makeCore(o, &fake);
+    const std::uint32_t n = 23; // batches 5 5 5 5 3 on streams 0 1 2 0 1
+    const auto hostA      = items(n, plus100);
+    const auto hostB      = items(n, times3);
+    DeviceBuffer inA = DeviceBuffer::fromHost(std::span<const float>(hostA));
+    DeviceBuffer inB = DeviceBuffer::fromHost(std::span<const float>(hostB));
+    DeviceBuffer r0(std::size_t(n) * sizeof(std::uint32_t)), r1(std::size_t(n) * sizeof(std::uint32_t));
+    auto check = [&](bool a, DeviceBuffer& r) {
+        core->checkDevice(DeviceItems{(a ? inA : inB).ptr(), n, 0}, DeviceSpan<std::uint32_t>{r.ptr(), n});
+        std::vector<std::uint32_t> out(n);
+        r.download(out.data(), out.size() * sizeof(std::uint32_t));
+        for (std::uint32_t i = 0; i < n; ++i) {
+            EXPECT_EQ(out[i], (a ? 100 + i : 3 * i + 1) + 7) << "item " << i;
+        }
+    };
+    std::size_t finishes = 0;
+    // check 1: keys (0,5,own) (1,5,own) (2,5,own) (1,3,own); check 2 adds (2,5,r0 + 10 items) (stream 2's only
+    // batch repeats its target); check 3 replays everything; check 4 into r1 (new targets: own counters again).
+    const std::size_t expectedCaptures[] = {4, 5, 5, 5, 6}; // check 5: stream 2 counts directly into r1: new key
+    int k = 0;
+    for (const auto& [a, r] : {std::pair<bool, DeviceBuffer*>{true, &r0}, {false, &r0}, {true, &r0}, {false, &r1}, {true, &r1}}) {
+        // prepareCompute()'s host-side effect: poison it before every check. On replayed batches it is not run, so
+        // the flag stays poisoned; results (checked inside) and prepareFinish's arguments must not care.
+        std::fill(fake->hostFlag.begin(), fake->hostFlag.end(), 0xDEADu);
+        const std::size_t capturesBefore = fake->computeCalls.size();
+        check(a, *r);
+        if (fake->computeCalls.size() == capturesBefore) {
+            for (std::uint32_t v : fake->hostFlag) {
+                EXPECT_EQ(v, 0xDEADu) << "check " << k << ": a fully replayed check ran prepareCompute's host code";
+            }
+        }
+        finishes += 5;
+        EXPECT_EQ(fake->computeCalls.size(), expectedCaptures[k]) << "check " << k;
+        EXPECT_EQ(fake->finishCalls.size(), finishes) << "check " << k << ": prepareFinish runs for every batch";
+        ++k;
+    }
+    EXPECT_TRUE(fake->calls.empty()) << "split batches with graph_prepare never call prepare()";
+    for (const auto& c : fake->computeCalls) {
+        EXPECT_TRUE(c.capturing) << "prepareCompute must only be called inside the capture";
+    }
+    // prepareFinish never inside a capture; its items are the stream's staging buffer (graph batch), the same
+    // address prepareCompute was captured with; its hit counters follow the direct-counting rule, also on replays
+    // (where prepareCompute's host code -- hostFlag -- did not run).
+    for (const auto& f : fake->finishCalls) {
+        EXPECT_FALSE(f.capturing) << "batch " << f.batch;
+        for (const auto& c : fake->computeCalls) {
+            if (c.streamIndex == f.streamIndex) {
+                EXPECT_EQ(c.items, f.items) << "staging address";
+            }
+        }
+    }
+    // check 2 (finish calls 5..9): stream 2's batch 2 counted directly into r0 at item 10
+    for (std::size_t j = 5; j < 10; ++j) {
+        const auto& f = fake->finishCalls[j];
+        if (f.streamIndex == 2) {
+            EXPECT_EQ(f.hitCounts, r0.ptr() + 10 * sizeof(std::uint32_t));
+        } else {
+            EXPECT_TRUE(f.hitCounts < r0.ptr() || f.hitCounts >= r0.ptr() + r0.size()) << "batch " << f.batch;
+        }
+    }
+    // check 4 (r1, new targets): every batch on the streams' own counters again
+    for (std::size_t j = 15; j < 20; ++j) {
+        const auto& f = fake->finishCalls[j];
+        EXPECT_TRUE(f.hitCounts < r1.ptr() || f.hitCounts >= r1.ptr() + r1.size()) << "batch " << f.batch;
+    }
+    // host checks and strided device items (not replayed: prepare() every batch) stay right
+    const auto ch = counts(*core, hostB, n);
+    for (std::uint32_t i = 0; i < n; ++i) {
+        EXPECT_EQ(ch[i], 3 * i + 1 + 7);
+    }
+    const std::size_t stride = fpi + 2;
+    const auto strided       = items(n, plus100, stride);
+    DeviceBuffer inS         = DeviceBuffer::fromHost(std::span<const float>(strided));
+    const std::size_t before = fake->calls.size();
+    core->checkDevice(DeviceItems{inS.ptr(), n, stride}, DeviceSpan<std::uint32_t>{r0.ptr(), n});
+    EXPECT_EQ(fake->calls.size(), before + 5);
+    std::vector<std::uint32_t> out(n);
+    r0.download(out.data(), out.size() * sizeof(std::uint32_t));
+    for (std::uint32_t i = 0; i < n; ++i) {
+        EXPECT_EQ(out[i], 107 + i);
+    }
+
+    // graph_prepare = false: prepare() every batch, never compute / finish
+    CheckerConfig off = cfg;
+    off.graphPrepare  = false;
+    FakeBackend* fake2 = nullptr;
+    auto core2         = makeCore(o, &fake2, &off);
+    counts(*core2, hostA, n);
+    EXPECT_EQ(fake2->calls.size(), 5u);
+    EXPECT_TRUE(fake2->computeCalls.empty());
+    EXPECT_TRUE(fake2->finishCalls.empty());
+}
+
+TEST_P(CoreTest, SplitEvictionAndManyItemCountsStayCorrect) {
+    FakeBackend* fake = nullptr;
+    FakeOptions o;
+    o.splitThreshold = 1;
+    CheckerConfig one = cfg;
+    one.numStreams    = 1;
+    one.maxBatchSize  = 16;
+    auto core         = makeCore(o, &fake, &one);
+    const auto in     = items(kMaxItems, times3);
+    DeviceBuffer dIn  = DeviceBuffer::fromHost(std::span<const float>(in));
+    DeviceBuffer r(std::size_t(kMaxItems) * sizeof(std::uint32_t));
+    for (int rep = 0; rep < 3; ++rep) {
+        for (std::uint32_t n = 1; n <= 16; ++n) { // 16 item counts > the per-stream cache of 8: evictions
+            for (int twice = 0; twice < 2; ++twice) { // the second check counts directly into r (another key)
+                std::fill(fake->hostFlag.begin(), fake->hostFlag.end(), 0xDEADu); // must not matter (see above)
+                core->checkDevice(DeviceItems{dIn.ptr(), n, 0}, DeviceSpan<std::uint32_t>{r.ptr(), n});
+                std::vector<std::uint32_t> out(n);
+                r.download(out.data(), out.size() * sizeof(std::uint32_t));
+                for (std::uint32_t i = 0; i < n; ++i) {
+                    ASSERT_EQ(out[i], 3 * i + 1) << "n " << n << " rep " << rep << " twice " << twice;
+                }
+            }
+        }
+    }
+    for (const auto& f : fake->finishCalls) {
+        ASSERT_FALSE(f.capturing);
+    }
+    EXPECT_EQ(fake->finishCalls.size(), std::size_t(3 * 16 * 2));
+    EXPECT_GT(fake->computeCalls.size(), std::size_t(16)) << "evicted keys are captured again";
+}
+
+TEST_P(CoreTest, SplitComputeFailureInsideCaptureIsCleanedUp) {
+    FakeBackend* fake = nullptr;
+    FakeOptions o;
+    o.splitThreshold = 1;
+    o.throwAtBatch   = 4; // 23 items: batch 4 (stream 1, 3 items) is the first of its key: throws inside the capture
+    auto core        = makeCore(o, &fake);
+    const auto in    = items(kMaxItems, times3);
+    std::vector<std::uint8_t> flags(kMaxItems);
+    EXPECT_THROW(core->checkHost(HostItems{in, 23, 0}, flags, {}), InvalidArgument);
+    for (const StreamContext& s : core->streams()) {
+        cudaStreamCaptureStatus st = cudaStreamCaptureStatusActive;
+        EXPECT_EQ(cudaStreamIsCapturing(s.stream, &st), cudaSuccess);
+        EXPECT_EQ(st, cudaStreamCaptureStatusNone) << "stream " << s.index << " left capturing";
+        EXPECT_EQ(cudaStreamQuery(s.stream), cudaSuccess) << "stream " << s.index << " not drained";
+    }
+    for (const auto& f : fake->finishCalls) {
+        EXPECT_FALSE(f.capturing);
+        EXPECT_NE(f.batch, 4u) << "prepareFinish after a failed prepareCompute";
+    }
+    for (int rep = 0; rep < 2; ++rep) {
+        const auto c = counts(*core, in, 20); // batch 4 never happens
+        for (std::uint32_t i = 0; i < 20; ++i) {
+            EXPECT_EQ(c[i], 3 * i + 1);
+        }
+    }
+}
+
+TEST_P(CoreTest, SplitAndSynchronizingOrCapturableIsAnInternalError) {
+    const auto in = items(kMaxItems, times3);
+    std::vector<std::uint8_t> flags(kMaxItems);
+    for (int variant = 0; variant < 2; ++variant) {
+        FakeBackend* fake = nullptr;
+        FakeOptions o;
+        o.splitThreshold = 1;
+        if (variant == 0) {
+            o.syncThreshold = kBatch;
+        } else {
+            o.capturableThreshold = 1;
+        }
+        auto core = makeCore(o, &fake);
+        try {
+            core->checkHost(HostItems{in, 10, 0}, flags, {});
+            ADD_FAILURE() << "no exception, variant " << variant;
+        } catch (const Error& e) {
+            EXPECT_EQ(e.kind(), ErrorKind::Internal) << e.what();
+        }
+        EXPECT_TRUE(fake->computeCalls.empty());
+        EXPECT_TRUE(fake->finishCalls.empty());
+    }
+}
+
 TEST_P(CoreTest, WarmupRunsOneFullCapacityCheck) {
     FakeBackend* fake = nullptr;
     auto core         = makeCore({}, &fake);

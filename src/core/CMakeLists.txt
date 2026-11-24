@@ -7,6 +7,7 @@ add_library(rtcd_core STATIC
   device_buffer.cpp
   context.cpp
   algorithms.cu             # internal/algorithms.h (compiled without fast math, like the old BBCollisionDetection.cu)
+  obb_sat.cuh               # its SAT test, shared (device code) with the mesh backend's fused kernel
   accel.cpp                 # internal/accel.h
 )
 target_include_directories(rtcd_core

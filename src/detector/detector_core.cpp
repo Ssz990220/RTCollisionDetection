@@ -403,22 +403,40 @@ namespace rtcd::detail {
         if (directHits) {
             view.hitCounts = DeviceSpan<std::uint32_t>{target, n};
         }
-        const bool graph = cfg_.graphPrepare && source.strideBytes == fpiBytes && backend_->prepareCapturable(n);
+        // Graph replay (CheckerConfig::graphPrepare, packed input only): the whole prepare() of a capturable batch,
+        // or prepareCompute() of a split batch (prepareFinish() then runs directly, after the graph launch).
+        const bool packed     = source.strideBytes == fpiBytes;
+        const bool capturable = cfg_.graphPrepare && packed && backend_->prepareCapturable(n);
+        const bool split      = cfg_.graphPrepare && packed && backend_->prepareSplit(n);
+        if (capturable || split) {
+            const char* what = capturable ? "prepareCapturable" : "prepareSplit";
+            if (capturable && split) {
+                internalError("backend '" + pipeline_->moduleName() + "': prepareCapturable(" + str(n)
+                              + ") and prepareSplit(" + str(n) + ") are both true");
+            }
+            if (backend_->synchronizesHost(n)) {
+                internalError("backend '" + pipeline_->moduleName() + "': " + what + "(" + str(n)
+                              + ") and synchronizesHost(" + str(n) + ") are both true");
+            }
+        }
+        const bool graph = capturable || split;
         // Direct items: a non-graph batch with packed input reads its items where they are (no staging copy).
-        const bool directItems = !graph && source.strideBytes == fpiBytes;
+        const bool directItems = !graph && packed;
         if (directItems) {
             view.items = DeviceSpan<const float>{src, std::size_t(n) * fpi};
         }
 
         LaunchPlan plan;
         if (graph) {
-            // 7.1 - 7.3 as one cudaGraphLaunch (CheckerConfig::graphPrepare, Backend::prepareCapturable).
-            if (backend_->synchronizesHost(n)) {
-                internalError("backend '" + pipeline_->moduleName() + "': prepareCapturable(" + str(n)
-                              + ") and synchronizesHost(" + str(n) + ") are both true");
-            }
-            plan = graphPrepare(s, view, src, std::size_t(n) * fpiBytes);
+            // 7.1 - 7.3 (split: 7.1, 7.2 and prepareCompute) as one cudaGraphLaunch.
+            plan = graphPrepare(s, view, src, std::size_t(n) * fpiBytes, split);
             mark(slot, Phase::GraphLaunch);
+            if (split) {
+                // The OptiX part, a direct call: graphPrepare() has ended its capture on every path.
+                requireNotCapturing(st, "prepareFinish");
+                plan = backend_->prepareFinish(sc, view);
+                mark(slot, Phase::Prepare);
+            }
         } else {
             // 7.1 zero the batch's hit counters.
             RTCD_CUDA_CHECK(cudaMemsetAsync(toPtr(view.hitCounts.ptr), 0, std::size_t(n) * sizeof(std::uint32_t), sc.stream));
@@ -437,6 +455,7 @@ namespace rtcd::detail {
             if (backend_->synchronizesHost(n)) {
                 ++st.hostSyncs;
             }
+            requireNotCapturing(st, "prepare");
             plan = backend_->prepare(sc, view);
             mark(slot, Phase::Prepare);
         }
@@ -459,6 +478,7 @@ namespace rtcd::detail {
                 }
             }
             mark(slot, Phase::Params);
+            requireNotCapturing(st, "optixLaunch");
             pipeline_->launch(sc.stream, st.params.ptr(), plan.paramsBytes, plan);
             mark(slot, Phase::Launch);
             ++st.launches;
@@ -480,33 +500,50 @@ namespace rtcd::detail {
     // CheckerConfig::graphPrepare (CUDA graph replay of steps 7.1 - 7.3)
     // -----------------------------------------------------------------------------------------------------------
 
-    LaunchPlan DetectorCore::graphPrepare(std::uint32_t s, const BatchView& view, DevicePtr src, std::size_t stagingBytes) {
+    void DetectorCore::requireNotCapturing(const StreamState& st, const char* call) const {
+        if (st.capturing) {
+            internalError(std::string("DetectorCore: ") + call + " would run inside a stream capture");
+        }
+    }
+
+    LaunchPlan DetectorCore::graphPrepare(
+        std::uint32_t s, const BatchView& view, DevicePtr src, std::size_t stagingBytes, bool split) {
         StreamState& st         = streams_[s];
         const StreamContext& sc = streamCtx_[s];
         const std::uint32_t n   = view.itemCount;
 
+        // Key: (stream, item count, hit-count address, kind). Everything else the captured work reads is fixed per
+        // stream: the staging buffer (BatchView::items of every graph batch) and the backend's per-stream state.
         PrepareGraph* g = nullptr;
         for (const auto& p : st.graphs) {
-            if (p->itemCount == n && p->hits == view.hitCounts.ptr) {
+            if (p->itemCount == n && p->hits == view.hitCounts.ptr && p->split == split) {
                 g = p.get();
                 break;
             }
         }
         if (g == nullptr) {
-            // Capture steps 7.1 - 7.3 once for this (stream, item count, hit-count address). prepareCapturable(n)
-            // promises plain CUDA work only and a plan / params that depend only on (stream, n, hitCounts): replaying
-            // the graph on new contents of the same staging / hit-count buffers is equivalent to calling prepare().
+            // Capture once for this key. prepareCapturable(n): steps 7.1 - 7.3, plain CUDA work only, plan / params
+            // depending only on the key, so a replay on new contents of the same buffers equals calling prepare().
+            // prepareSplit(n): steps 7.1, 7.2 and prepareCompute() (plain CUDA work only); prepareFinish() is called
+            // by the caller after this function returned, i.e. after the capture ended on every path.
             auto entry       = std::make_unique<PrepareGraph>();
             entry->itemCount = n;
             entry->hits      = view.hitCounts.ptr;
+            entry->split     = split;
             cudaGraph_t graph = nullptr;
             RTCD_CUDA_CHECK(cudaStreamBeginCapture(sc.stream, cudaStreamCaptureModeThreadLocal));
+            st.capturing = true;
             LaunchPlan plan;
             try {
                 RTCD_CUDA_CHECK(cudaMemsetAsync(toPtr(view.hitCounts.ptr), 0, std::size_t(n) * sizeof(std::uint32_t), sc.stream));
                 copyWordsAsync(st.staging.ptr(), src, stagingBytes / sizeof(std::uint32_t), sc.stream); // kernel node
-                plan = backend_->prepare(sc, view);
+                if (split) {
+                    backend_->prepareCompute(sc, view);
+                } else {
+                    plan = backend_->prepare(sc, view);
+                }
             } catch (...) {
+                st.capturing = false;
                 (void) cudaStreamEndCapture(sc.stream, &graph);
                 if (graph != nullptr) {
                     cudaGraphDestroy(graph);
@@ -514,6 +551,7 @@ namespace rtcd::detail {
                 (void) cudaGetLastError();
                 throw;
             }
+            st.capturing = false;
             RTCD_CUDA_CHECK(cudaStreamEndCapture(sc.stream, &graph));
             entry->graph = graph;
             // The staging copy is the one copyWords kernel node (the core's own kernel; backends cannot issue it).
@@ -559,6 +597,9 @@ namespace rtcd::detail {
             g->stagingSrc = src;
         }
         RTCD_CUDA_CHECK(cudaGraphLaunch(g->exec, sc.stream));
+        if (g->split) {
+            return LaunchPlan{}; // the plan comes from prepareFinish()
+        }
         LaunchPlan plan = g->plan;
         plan.params     = plan.paramsBytes > 0 ? g->params.data() : nullptr;
         return plan;

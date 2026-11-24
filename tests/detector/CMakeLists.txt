@@ -39,6 +39,20 @@ foreach(mode ias ray)
   set_tests_properties(rtcd_regression_${mode}_copy_transfer PROPERTIES LABELS "new_gpu;regression")
 endforeach()
 
+# Mesh with graph_prepare off (G3: the masked and OBB-off paths are split, prepareCompute graph-replayed by
+# default): prepare() called directly for every batch. Default setup, masked path only, OBB off.
+foreach(v "nograph|graph_prepare=false"
+          "never_compact_nograph|graph_prepare=false,mesh.compaction_min_poses=100000"
+          "obb_off_nograph|graph_prepare=false,obb_culling=false")
+  string(REPLACE "|" ";" parts "${v}")
+  list(GET parts 0 name)
+  list(GET parts 1 ov)
+  add_test(NAME rtcd_regression_ias_${name}
+    COMMAND rtcd_regression --setup ${PROJECT_SOURCE_DIR}/configs/setups/regression_ias.json --override ${ov}
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
+  set_tests_properties(rtcd_regression_ias_${name} PROPERTIES LABELS "new_gpu;regression")
+endforeach()
+
 rtcd_add_new_test(test_address_rules LABEL new_gpu
   SOURCES test_address_rules.cpp
   LIBS rtcd rtcd_testsupport rtcd_json)

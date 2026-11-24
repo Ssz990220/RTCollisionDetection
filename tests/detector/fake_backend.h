@@ -57,6 +57,7 @@ namespace rtcd_detector_test {
         bool throwInBeginCheck          = false; // beginCheck() throws UnsupportedError
         std::uint32_t syncThreshold     = ~0u;   // synchronizesHost(n) = n >= syncThreshold (and prepare syncs)
         std::uint32_t capturableThreshold = ~0u; // prepareCapturable(n) = n >= capturableThreshold
+        std::uint32_t splitThreshold    = ~0u; // prepareSplit(n) = n >= splitThreshold
         std::uint32_t badRaygen         = ~0u;   // batch whose plan has raygen = 99 (invalid plan)
         long long spinCycles            = 0;     // for kRaygenSpin
         rtcd::TraversableHandle traversable = 0;
@@ -75,6 +76,7 @@ namespace rtcd_detector_test {
             rtcd::DevicePtr items = 0, hitCounts = 0;
             std::thread::id thread;
             bool contextCurrent = false; // the Context's CUDA context was current on the calling thread
+            bool capturing      = false; // prepareCompute / prepareFinish: the stream was capturing
         };
 
         FakeBackend(const rtcd::BackendCreateInfo& info, FakeOptions opts)
@@ -84,6 +86,7 @@ namespace rtcd_detector_test {
             for (const rtcd::StreamContext& s : info.streams) {
                 streams.push_back(s);
                 scratch_.emplace_back(64);
+                hostFlag.push_back(0);
             }
             programs_ = fakePrograms();
             if (opts_.editPrograms) {
@@ -101,6 +104,57 @@ namespace rtcd_detector_test {
             }
         }
         rtcd::LaunchPlan prepare(const rtcd::StreamContext& stream, const rtcd::BatchView& batch) override {
+            pushCall(calls, record(stream, batch));
+            // Real GPU work on the batch's stream from the dispatching thread (needs the current context).
+            scratch_.at(stream.index).memsetAsync(0, 64, stream.stream);
+            if (batch.batchIndex == opts_.throwAtBatch) {
+                throw rtcd::InvalidArgument("fake prepare failure at batch " + std::to_string(batch.batchIndex));
+            }
+            if (synchronizesHost(batch.itemCount)) {
+                RTCD_CUDA_CHECK(cudaStreamSynchronize(stream.stream));
+            }
+            return makePlan(stream, batch);
+        }
+        bool synchronizesHost(std::uint32_t itemCount) const noexcept override {
+            return itemCount >= opts_.syncThreshold;
+        }
+        bool prepareCapturable(std::uint32_t itemCount) const noexcept override {
+            return itemCount >= opts_.capturableThreshold;
+        }
+        // Split (Backend::prepareSplit): prepareCompute = the memset (plain CUDA work) + a HOST-side effect that
+        // must not matter (hostFlag, overwritten with junk; replays do not run it); prepareFinish = the plan, from
+        // its arguments alone, plus a record of whether its stream was capturing.
+        bool prepareSplit(std::uint32_t itemCount) const noexcept override { return itemCount >= opts_.splitThreshold; }
+        void prepareCompute(const rtcd::StreamContext& stream, const rtcd::BatchView& batch) override {
+            Call c      = record(stream, batch);
+            c.capturing = isCapturing(stream.stream);
+            pushCall(computeCalls, c);
+            scratch_.at(stream.index).memsetAsync(0, 64, stream.stream);
+            hostFlag.at(stream.index) = 0xC0FFEE00u + batch.batchIndex; // nothing may depend on this
+            if (batch.batchIndex == opts_.throwAtBatch) {
+                throw rtcd::InvalidArgument("fake prepareCompute failure at batch " + std::to_string(batch.batchIndex));
+            }
+        }
+        rtcd::LaunchPlan prepareFinish(const rtcd::StreamContext& stream, const rtcd::BatchView& batch) override {
+            Call c      = record(stream, batch);
+            c.capturing = isCapturing(stream.stream);
+            pushCall(finishCalls, c);
+            return makePlan(stream, batch);
+        }
+
+        std::vector<rtcd::StreamContext> streams;
+        std::vector<rtcd::CheckInfo> begins;
+        std::vector<Call> calls;        // prepare()
+        std::vector<Call> computeCalls; // prepareCompute() (graph captures of split batches)
+        std::vector<Call> finishCalls;  // prepareFinish()
+        std::vector<std::uint32_t> hostFlag; // per stream, written by prepareCompute() only
+
+    private:
+        static bool isCapturing(rtcd::StreamHandle s) {
+            cudaStreamCaptureStatus st = cudaStreamCaptureStatusNone;
+            return cudaStreamIsCapturing(s, &st) != cudaSuccess || st != cudaStreamCaptureStatusNone;
+        }
+        Call record(const rtcd::StreamContext& stream, const rtcd::BatchView& batch) const {
             Call c;
             c.streamIndex    = stream.index;
             c.stream         = stream.stream;
@@ -114,18 +168,13 @@ namespace rtcd_detector_test {
             c.thread         = std::this_thread::get_id();
             CUcontext cur    = nullptr;
             c.contextCurrent = cuCtxGetCurrent(&cur) == CUDA_SUCCESS && cur != nullptr && cur == ctx_->cudaContext();
-            {
-                std::lock_guard<std::mutex> lock(mutex_);
-                calls.push_back(c);
-            }
-            // Real GPU work on the batch's stream from the dispatching thread (needs the current context).
-            scratch_.at(stream.index).memsetAsync(0, 64, stream.stream);
-            if (batch.batchIndex == opts_.throwAtBatch) {
-                throw rtcd::InvalidArgument("fake prepare failure at batch " + std::to_string(batch.batchIndex));
-            }
-            if (synchronizesHost(batch.itemCount)) {
-                RTCD_CUDA_CHECK(cudaStreamSynchronize(stream.stream));
-            }
+            return c;
+        }
+        void pushCall(std::vector<Call>& v, const Call& c) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            v.push_back(c);
+        }
+        rtcd::LaunchPlan makePlan(const rtcd::StreamContext& stream, const rtcd::BatchView& batch) {
             TestParams& p   = params_.at(stream.index);
             p               = {};
             p.traversable   = opts_.traversable;
@@ -145,18 +194,7 @@ namespace rtcd_detector_test {
             plan.raygen      = batch.batchIndex == opts_.badRaygen ? 99u : opts_.raygen(batch.batchIndex);
             return plan;
         }
-        bool synchronizesHost(std::uint32_t itemCount) const noexcept override {
-            return itemCount >= opts_.syncThreshold;
-        }
-        bool prepareCapturable(std::uint32_t itemCount) const noexcept override {
-            return itemCount >= opts_.capturableThreshold;
-        }
 
-        std::vector<rtcd::StreamContext> streams;
-        std::vector<rtcd::CheckInfo> begins;
-        std::vector<Call> calls;
-
-    private:
         FakeOptions opts_;
         std::shared_ptr<rtcd::Context> ctx_;
         rtcd::Mode mode_ = rtcd::Mode::LinearCurve;

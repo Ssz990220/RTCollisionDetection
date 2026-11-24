@@ -143,10 +143,20 @@ TEST(GraphPrepare, PrepareCapturablePerBackend) {
         std::unique_ptr<Backend> b = r.mode == Mode::Ray    ? createRayBackend(info)
                                    : r.mode == Mode::Mesh ? createMeshBackend(info)
                                                           : createCurveBackend(info);
-        for (std::uint32_t n : {1u, 2u, r.maxBatchSize / 2, r.maxBatchSize}) {
+        for (std::uint32_t n : {1u, 2u, 127u, 128u, r.maxBatchSize / 2, r.maxBatchSize}) {
+            if (n > r.maxBatchSize) {
+                continue;
+            }
             EXPECT_EQ(b->prepareCapturable(n), k.expectCapturable) << k.setup << " " << k.overrides << " n " << n;
             if (b->prepareCapturable(n)) {
                 EXPECT_FALSE(b->synchronizesHost(n)) << k.setup << " n " << n;
+            }
+            // prepareSplit (G3): mesh below mesh.compaction_min_poses (masked and OBB-off paths), nobody else
+            const bool split = r.mode == Mode::Mesh && n < r.mesh.compactionMinPoses;
+            EXPECT_EQ(b->prepareSplit(n), split) << k.setup << " " << k.overrides << " n " << n;
+            if (b->prepareSplit(n)) {
+                EXPECT_FALSE(b->synchronizesHost(n)) << k.setup << " n " << n;
+                EXPECT_FALSE(b->prepareCapturable(n)) << k.setup << " n " << n;
             }
         }
         if (r.mode == Mode::Ray) {

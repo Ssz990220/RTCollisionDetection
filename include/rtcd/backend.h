@@ -8,7 +8,8 @@
 //     for batch b (on stream s = b % numStreams, in batch order per stream):
 //         core: zero the batch's hit counters        (BatchView::hitCounts: stream s's buffer or the result range)
 //         core: copy the items into stream s's staging buffer (BatchView::items), unless they are read in place
-//         plan = backend.prepare(streams[s], batch)                        // per batch
+//         plan = backend.prepare(streams[s], batch)                        // per batch (split backends: graph-
+//                                                                          //  replayed prepareCompute + prepareFinish)
 //         core: upload plan.params (skipped if byte-identical to stream s's last upload), optixLaunch(...)
 //               unless plan.launch == false
 //         core: copy hitCounts into the check result at batch.firstItem, unless counted there directly
@@ -219,6 +220,30 @@ namespace rtcd {
     //   OptiX device context with an invalid internal event (later launches fail with OPTIX_ERROR_INVALID_VALUE,
     //   context destruction fails). A backend whose prepare() builds or refits an acceleration structure must
     //   return false. Default: false.
+    //
+    // prepareSplit(itemCount) (added 2026-11-24, Track G3, CheckerConfig::graphPrepare): exact, host-only predicate:
+    //   true iff prepare() of a batch with that item count is equivalent to
+    //       prepareCompute(stream, batch); return prepareFinish(stream, batch);
+    //   where
+    //     prepareCompute() enqueues only plain CUDA work on its stream (rule (a) of prepareCapturable: kernels,
+    //       memset / memcpy; no OptiX API call of any kind, no host synchronization, no device allocation) and does
+    //       the same work whenever (stream index, itemCount, batch.items.ptr, batch.hitCounts.ptr) are the same, so
+    //       that replaying a capture of it on new contents of the same buffers equals calling it again;
+    //     prepareFinish() does the rest (acceleration-structure build / refit, params, the LaunchPlan) and is called
+    //       directly for every batch, never inside a stream capture; it may enqueue plain CUDA work as well as OptiX
+    //       calls, on its stream only.
+    //   On a replay prepareCompute()'s host code does NOT run. prepareCompute() must have no host-side effect that
+    //   prepareFinish(), the launch or a later batch relies on (no member updates such as params fields, counters,
+    //   cached pointers): everything the host needs is set by prepareFinish(), from its arguments alone.
+    //   A backend that returns true must override both prepareCompute() and prepareFinish(); the defaults exist only
+    //   for backends that never split.
+    //   true implies !synchronizesHost(itemCount) and !prepareCapturable(itemCount) (the core treats either
+    //   combination as an internal error). With CheckerConfig::graphPrepare the core captures "zero hits, staging
+    //   copy, prepareCompute()" once per (stream, itemCount, hitCounts address), replays it with one cudaGraphLaunch
+    //   per batch (items then always in the stream's staging buffer) and calls prepareFinish() right after it;
+    //   without graphPrepare (and in internal::ReferenceBatchRunner) it calls prepare(). prepare() must therefore
+    //   keep working for every batch. Defaults: false; prepareCompute() does nothing; prepareFinish() calls prepare().
+    //   Mesh: true on the masked path (OBB culling on, itemCount < mesh.compactionMinPoses); ray and curves: false.
     class Backend {
     public:
         virtual ~Backend() = default;
@@ -230,6 +255,17 @@ namespace rtcd {
         virtual bool prepareCapturable(std::uint32_t itemCount) const noexcept {
             (void) itemCount;
             return false;
+        }
+        virtual bool prepareSplit(std::uint32_t itemCount) const noexcept {
+            (void) itemCount;
+            return false;
+        }
+        virtual void prepareCompute(const StreamContext& stream, const BatchView& batch) {
+            (void) stream;
+            (void) batch;
+        }
+        virtual LaunchPlan prepareFinish(const StreamContext& stream, const BatchView& batch) {
+            return prepare(stream, batch);
         }
     };
 

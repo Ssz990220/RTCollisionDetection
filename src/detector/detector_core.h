@@ -90,6 +90,7 @@ namespace rtcd::detail {
         struct PrepareGraph {
             std::uint32_t itemCount = 0;
             DevicePtr hits          = 0;       // BatchView::hitCounts at capture (memset node, params)
+            bool split              = false;   // captured prepareCompute() (Backend::prepareSplit), not prepare()
             CUgraph_st* graph       = nullptr; // kept: owns the staging-copy node handle
             CUgraphExec_st* exec    = nullptr;
             CUgraphNode_st* stagingNode = nullptr;
@@ -114,6 +115,7 @@ namespace rtcd::detail {
             // Counters of the running check.
             std::uint32_t batches = 0, launches = 0, hostSyncs = 0, paramUploads = 0;
             DevicePtr lastTarget = 0; // result address of this stream's previous batch (direct hit counters)
+            bool capturing       = false; // true only while graphPrepare() captures on this stream
             std::vector<std::unique_ptr<PrepareGraph>> graphs; // graph-prepare experiment only
         };
         // Where the batches read their items: item i starts at base + i * strideBytes.
@@ -130,7 +132,11 @@ namespace rtcd::detail {
         void runBatch(std::uint32_t batch, std::uint32_t count, const ItemSource& source, DevicePtr results);
         // CheckerConfig::graphPrepare: launch (capturing it first if needed) the graph of steps 7.1-7.3 for `view` on
         // stream `s`; returns the plan prepare() returned at capture.
-        LaunchPlan graphPrepare(std::uint32_t s, const BatchView& view, DevicePtr src, std::size_t stagingBytes);
+        // split: capture prepareCompute() instead of prepare() and return an empty plan (the caller then calls
+        // prepareFinish()); the capture has ended on every path when this returns or throws.
+        LaunchPlan graphPrepare(std::uint32_t s, const BatchView& view, DevicePtr src, std::size_t stagingBytes, bool split);
+        // Internal error if stream st is inside graphPrepare()'s capture (no OptiX call / prepareFinish there).
+        void requireNotCapturing(const StreamState& st, const char* call) const;
         void destroyPrepareGraphs() noexcept;
         void drainStreams() noexcept;
         // Checked; synchronizes streams [0, used) (those that ran batches of the check) even if one fails, throws

@@ -187,9 +187,8 @@ dominates at small batches (381 of ~520 us per batch of 16).
 
   BM_IAS is unaffected (its `prepare()` builds the IAS, not capturable): N = 1 / 16 / 1024 at 98.5-99.6 /
   148.6-150.3 / 612.7-614.5 us on and off (separate processes, alternated).
-- **Next (not done):** mesh / curves would need `prepare()` split into a capturable CUDA part and a direct OptiX part
-  (estimated ~10 us per batch for mesh masked, ~4 us for curves); the result copy is gone for repeated
-  targets since G2 (below).
+- **Done since:** the mesh `prepare()` is split (G3, below; measured 2-5 us per batch, less than the ~10 us
+  estimated here); curves are not split (estimated ~0.2 us); the result copy is gone for repeated targets (G2).
 
 **Host-time breakdown and call reduction (Track G2, 2026-11-24).** Tool: `tests/experiments/host_breakdown`
 (`rtcd_exp_host_breakdown`: a `DetectorCore` of each benchmark configuration with a `PhaseTrace`
@@ -268,11 +267,8 @@ Breakdown AFTER (`a786ba8` + tests), same tool, N = 1, median us (device check /
 | upload / download (host) | 0 / 0 | 0 / 0 | 0 / 0 | 0 / 0 |
 | total device / host | 25.3 / 33.5 | 76.0 / 88.1 | 59.6 / 64.5 | 151.9 / 150.5 |
 
-What remains on the host for a single batch: ray 2 calls (graph launch, `optixLaunch`) + sync; mesh 6 (memset,
-3 kernels, IAS build, launch); curves 3-4. Next candidates, not done: a mesh `prepare()` split so memset + its
-3 kernels become one graph launch (contract change, not approved; estimate from the measured costs: memset 2.4 +
-3 kernels ~7.5 us -> graph ~4.7 us, i.e. ~5 us per mesh batch); fusing the mesh backend's transform/mask kernel with
-the OBB overlap kernel (-1 launch, ~2.5 us; needs a bit-identical copy of the SAT test from `src/core`).
+What remained on the host for a single batch after G2: ray 2 calls (graph launch, `optixLaunch`) + sync; mesh 6
+(memset, 3 kernels, IAS build, launch); curves 3-4. Mesh was cut to 3 by G3 (below).
 
 Final benchmarks, `rtcd_bench_discrete` / `rtcd_bench_curve`, base `00c8591` vs `a786ba8`, same session, base and
 new alternated, 2 rounds, `--benchmark_min_warmup_time=1 --benchmark_repetitions=3`, median of each, us (ratio new /
@@ -288,6 +284,37 @@ base per round):
 Nothing got slower at any size. With the paused pageable upload's DMA taken out of the timed region entirely
 (`--settle 1`), the remaining difference is ~1.5-2 us (the legacy-stream wait itself): BM_RAY / BM_IAS N = 1 would
 read about 25 / 76 us.
+
+**Mesh: fused kernel and split prepare (Track G3, 2026-11-24).**
+- *Fusion* (no contract change): on the masked path (OBB culling on, < `mesh.compaction_min_poses` items) the OBB
+  overlap count kernel and the instance transform / mask kernel are one kernel; the SAT test is shared device code
+  (`src/core/obb_sat.cuh`, used by `internal::obbOverlapCounts` too), so the cull decision is bit-identical. Same
+  process, 2 rounds: mesh `prepare()` 17.5-18.0 -> 14.8-15.3 us, check N=1 75.7 -> 72.9, N=16 126.1 -> 123.3, never
+  slower up to N=127. The compaction path keeps the count kernel.
+- *Split* (`Backend::prepareSplit` / `prepareCompute` / `prepareFinish`, approved contract change): below
+  `mesh.compaction_min_poses` items (masked and OBB-off paths) the core graph-replays "zero, staging copy (kernel
+  node), FK + link-OBB kernel, instance kernel" and calls `prepareFinish` (IAS build / refit, params, plan)
+  directly. `graph_prepare` on vs off, same process: masked N=1 / 16 / 64 / 127 -1.6 / -1.9 / -4.8 / -2.5 us; OBB
+  off N=1 / 16 / 64 / 256 -3.8 / -4.2 / -2.0 / -0.7 us but N=1024 +17.9 us (+1.9%), hence the 128-item limit.
+- Breakdown mesh N=1, `ac63fff` vs G3, median us (device / host check): zero 2.4 -> (graph); `prepare()` 15.9-16.4
+  -> graph launch 4.7 + `prepareFinish` 7.0-8.0; `optixLaunch` 8.1 -> 8.4; sync 47 -> 48 (GPU); total 76.0-77.0 /
+  89.0 -> 72.0 / 77.8-80.5. N=16: 126.6-127.7 / 129.0-132.9 -> 121.4 / 126.9. The mesh check at N <= 16 is now
+  about two thirds GPU time (the sync).
+- Final benchmarks, `ac63fff` vs G3, 3 rounds alternated, `--benchmark_min_warmup_time=1`, 3 repetitions, median us:
+
+  | N | BM_IAS base / new (ratio) | BM_RAY base / new |
+  |---|---|---|
+  | 1 | 77.9-78.2 / 73.7-74.6 (0.946-0.954) | 27.2-27.3 / 27.2-27.3 |
+  | 16 | 127.7-128.3 / 124.1-124.9 (0.971-0.975) | 34.8-35.1 / 34.8-35.0 |
+  | 64 | 190.2-191.0 / 187.2-187.7 (0.982-0.984) | - |
+  | 256 | 290.8-292.4 / 291.2-292.7 (0.998-1.002) | - |
+  | 1024 | 584.4-588.5 / 585.6-588.9 (0.999-1.006) | - |
+  | 4096 | 895.3-898.4 / 895.4-898.7 (0.998-1.003) | - |
+
+  (N >= 128 per batch is the compaction path, unchanged.)
+- *Curves, not split:* estimated from the measured per-call costs, a split would replace memset (2.4 us) + the
+  fused point kernel (~2.5 us) with one graph launch (~4.7 us) and put the staging copy back into the graph:
+  ~0.2 us per batch, not measurable; linear `prepare()` is 8.4 us, quad 34.7 us, mostly `optixAccelBuild`.
 
 **Ideas not yet tried:** Rocaps intersector for quadratic
 curves (`OPTIX_PRIMITIVE_TYPE_ROUND_QUADRATIC_BSPLINE_ROCAPS`; it intersects a true swept sphere, so results
