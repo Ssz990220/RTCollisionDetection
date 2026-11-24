@@ -19,6 +19,12 @@ namespace rtcd::mesh_detail {
     void writeInstanceTransformsAndMasks(
         DevicePtr instances, DevicePtr linkPoses, DevicePtr counts, std::size_t n, StreamHandle stream);
 
+    // Masked path, fused (G3): for i < linkObbs.count, instances[i].transform = linkPoses[i] and
+    // instances[i].visibilityMask = 255 if linkObbs[i] overlaps any of sceneObbs, else 0 -- the same decision as
+    // internal::obbOverlapCounts(...)[i] > 0 (shared device code core/obb_sat.cuh), without the count buffer.
+    void writeInstanceTransformsAndOverlapMasks(DevicePtr instances, DevicePtr linkPoses, DeviceSpan<const Obb> linkObbs,
+        DeviceSpan<const Obb> sceneObbs, StreamHandle stream);
+
     // Old upInsPoses (RTCD/Robot/robot.cu): for i < total, instances[i].transform = i < nActive ? linkPoses[i] :
     // park (the old __constant__ safeTransform, passed by value here). Visibility masks are not touched.
     struct ParkTransform {
