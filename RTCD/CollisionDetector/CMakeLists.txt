@@ -6,7 +6,7 @@ cuda_compile_and_embed(collisionIR optixir CCCuda.cu)
 cuda_compile_and_embed(rayCCIR optixir CCRay.cu)
 
 # the CC Interface library
-set(sourceFiles CollisionDetector.h launchParameters.h)
+set(sourceFiles CollisionDetector.h OptixCompileConfig.h launchParameters.h)
 add_library(CollisionDetector INTERFACE ${sourceFiles} ${collisionIR} ${rayCCIR})
 set_target_properties(CollisionDetector PROPERTIES FOLDER "RTCD/libs")
 target_link_libraries(CollisionDetector INTERFACE meshes)

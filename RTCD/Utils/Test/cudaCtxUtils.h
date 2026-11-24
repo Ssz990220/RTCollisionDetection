@@ -1,6 +1,7 @@
 #pragma once
 #include "optix_function_table.h"
 #include "optix_function_table_definition.h"
+#include <CollisionDetector/OptixCompileConfig.h>
 #include <Utils/optix7.h>
 #include <array>
 #include <tuple>
@@ -27,7 +28,10 @@ void defaultInitOptix() {
     // std::cout << "Optix initialized" << std::endl;
 }
 
-void createDefaultContext(CUcontext& cudaContext, OptixDeviceContext& optixContext) {
+// Context options come from the context fields of RTCD::OptixCompileConfig (validation mode, log callback level).
+// The default argument keeps the former behaviour: validation only in Debug builds, log callback only with PRINTIT.
+void createDefaultContext(CUcontext& cudaContext, OptixDeviceContext& optixContext,
+    const RTCD::OptixCompileConfig& cfg = RTCD::OptixCompileConfig::buildDefault()) {
     // for this sample, do everything on one device
     const int deviceID = 0;
     CUDA_CHECK(cudaSetDevice(deviceID));
@@ -41,31 +45,33 @@ void createDefaultContext(CUcontext& cudaContext, OptixDeviceContext& optixConte
     }
 
     OptixDeviceContextOptions options = {};
-#if defined(_DEBUG) || defined(DEBUG)
-    std::cout << "Debug mode" << std::endl;
-    options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_ALL;
-#endif
+    if (cfg.contextValidation) {
+        std::cout << "OptiX validation mode" << std::endl;
+        options.validationMode = OPTIX_DEVICE_CONTEXT_VALIDATION_MODE_ALL;
+    }
 
     OPTIX_CHECK(optixDeviceContextCreate(cudaContext, &options, &optixContext));
-#ifdef PRINTIT
-    OPTIX_CHECK(optixDeviceContextSetLogCallback(optixContext, context_log_cb, nullptr, 4));
-#endif
+    if (cfg.contextLogLevel > 0) {
+        OPTIX_CHECK(optixDeviceContextSetLogCallback(optixContext, context_log_cb, nullptr, cfg.contextLogLevel));
+    }
 }
 
-std::tuple<CUcontext, OptixDeviceContext> createContext() {
+std::tuple<CUcontext, OptixDeviceContext> createContext(
+    const RTCD::OptixCompileConfig& cfg = RTCD::OptixCompileConfig::buildDefault()) {
     defaultInitOptix();
     CUcontext cudaContext;
     OptixDeviceContext optixContext;
-    createDefaultContext(cudaContext, optixContext);
+    createDefaultContext(cudaContext, optixContext, cfg);
     return std::make_tuple(cudaContext, optixContext);
 }
 
 template <size_t NSTREAM>
-std::tuple<CUcontext, OptixDeviceContext, std::array<cudaStream_t, NSTREAM>> createContextStream() {
+std::tuple<CUcontext, OptixDeviceContext, std::array<cudaStream_t, NSTREAM>> createContextStream(
+    const RTCD::OptixCompileConfig& cfg = RTCD::OptixCompileConfig::buildDefault()) {
     defaultInitOptix();
     CUcontext cudaContext;
     OptixDeviceContext optixContext;
-    createDefaultContext(cudaContext, optixContext);
+    createDefaultContext(cudaContext, optixContext, cfg);
     std::array<cudaStream_t, NSTREAM> streams;
     for (auto& stream : streams) {
         CUDA_CHECK(cudaStreamCreate(&stream));

@@ -1,6 +1,7 @@
 #pragma once
 #include "BBCollisionDetection.cuh"
 #include "CCRobotWrapper.h"
+#include "OptixCompileConfig.h"
 #include "launchParameters.h"
 #include "threadPool.h"
 #undef max
@@ -40,6 +41,11 @@ namespace RTCD {
         void resetRobot();
         void resetSBT();
         void setupOptix();
+
+        // OptiX compile / link settings (see OptixCompileConfig.h). Call before setupOptix(); calling it afterwards
+        // with different pipeline settings re-creates modules, program groups and pipelines (and the SBT if built).
+        void setCompileConfig(const OptixCompileConfig& cfg);
+        const OptixCompileConfig& getCompileConfig() const { return compileCfg; }
 
         void updateASHandle(const OptixTraversableHandle handle, const size_t frameID);
         void setNCheck(const uint nCheck);
@@ -93,6 +99,7 @@ namespace RTCD {
         OptixDeviceContext optixContext                = 0;
         OptixPipelineLinkOptions pipelineLinkOptions   = {};
         OptixModuleCompileOptions moduleCompileOptions = {};
+        OptixCompileConfig compileCfg                  = OptixCompileConfig::buildDefault();
 
         // OBB related
         size_t nRobotOBBs = 0;
@@ -271,6 +278,19 @@ namespace RTCD { // CC Initializers
             }
         }
         optixCreated = false;
+    }
+
+    template <size_t NSTREAM, LinkType TYPE>
+    void CollisionDetector<NSTREAM, TYPE>::setCompileConfig(const OptixCompileConfig& cfg) {
+        const bool changed = !compileCfg.samePipeline(cfg);
+        compileCfg         = cfg;
+        if (optixCreated && changed) {
+            const bool hadSBT = sbt.raygenRecord != 0;
+            setupOptix();
+            if (hadSBT) {
+                buildSBT(); // SBT records are packed from the (now replaced) program groups
+            }
+        }
     }
 
     template <size_t NSTREAM, LinkType TYPE>
@@ -607,7 +627,11 @@ namespace RTCD { // Optix Pipeline Setup
 
     template <size_t NSTREAM, LinkType TYPE>
     void CollisionDetector<NSTREAM, TYPE>::createModule(const unsigned int buildFlags) {
-        moduleCompileOptions.maxRegisterCount = 50;
+        // All compile / link settings come from compileCfg (defaults = former Release / Debug macro branches).
+        moduleCompileOptions                  = {};
+        moduleCompileOptions.maxRegisterCount = compileCfg.maxRegisterCount;
+        moduleCompileOptions.optLevel         = compileCfg.optLevel;
+        moduleCompileOptions.debugLevel       = compileCfg.debugLevel;
 
         pipelineCompileOptions                = {};
         pipelineCompileOptions.usesMotionBlur = false;
@@ -617,18 +641,7 @@ namespace RTCD { // Optix Pipeline Setup
             pipelineCompileOptions.numPayloadValues = 0;
         }
         pipelineCompileOptions.numAttributeValues = 2;
-#if defined(_DEBUG) || defined(DEBUG)
-        moduleCompileOptions.optLevel         = OPTIX_COMPILE_OPTIMIZATION_LEVEL_0;
-        moduleCompileOptions.debugLevel       = OPTIX_COMPILE_DEBUG_LEVEL_FULL;
-        pipelineCompileOptions.exceptionFlags = OPTIX_EXCEPTION_FLAG_TRACE_DEPTH | OPTIX_EXCEPTION_FLAG_STACK_OVERFLOW;
-#elif defined(OPTIX_PROFILE)
-        std::cout << "Using Profile Model" << std::endl;
-        moduleCompileOptions.optLevel   = OPTIX_COMPILE_OPTIMIZATION_DEFAULT;
-        moduleCompileOptions.debugLevel = OPTIX_COMPILE_DEBUG_LEVEL_MODERATE;
-#else
-        moduleCompileOptions.optLevel         = OPTIX_COMPILE_OPTIMIZATION_DEFAULT;
-        pipelineCompileOptions.exceptionFlags = OPTIX_EXCEPTION_FLAG_NONE;
-#endif
+        pipelineCompileOptions.exceptionFlags     = compileCfg.exceptionFlags;
 
         pipelineCompileOptions.pipelineLaunchParamsVariableName = "optixLaunchParams";
 
@@ -655,7 +668,8 @@ namespace RTCD { // Optix Pipeline Setup
 #endif
         }
 
-        pipelineLinkOptions.maxTraceDepth = 2;
+        pipelineLinkOptions               = {};
+        pipelineLinkOptions.maxTraceDepth = compileCfg.maxTraceDepth;
 
         size_t inputSize = 0;
         if constexpr (TYPE == LinkType::RAY_ONLINE) {
@@ -717,7 +731,15 @@ namespace RTCD { // Optix Pipeline Setup
         pgDesc.kind                        = OPTIX_PROGRAM_GROUP_KIND_RAYGEN;
         pgDesc.raygen.module               = Module;
         if constexpr (TYPE == LinkType::RAY_ONLINE) {
-            pgDesc.raygen.entryFunctionName = "__raygen__robotRayCompact";
+            // All variants are compiled into CCRay.cu's module; the hit mode only selects the entry point.
+            switch (compileCfg.rayHitMode) {
+            case RayHitMode::FIRST_HIT_CH: pgDesc.raygen.entryFunctionName = "__raygen__robotRayFirstHitCH"; break;
+            case RayHitMode::FIRST_HIT_MISS: pgDesc.raygen.entryFunctionName = "__raygen__robotRayFirstHitMiss"; break;
+            case RayHitMode::FIRST_HIT_TRAVERSE:
+                pgDesc.raygen.entryFunctionName = "__raygen__robotRayFirstHitTraverse";
+                break;
+            default: pgDesc.raygen.entryFunctionName = "__raygen__robotRayCompact"; break;
+            }
             // } else if constexpr (TYPE == LinkType::RAY_STATIC) {
             //     pgDesc.raygen.entryFunctionName = "__raygen__robotRayOnline";
         } else {
@@ -745,6 +767,13 @@ namespace RTCD { // Optix Pipeline Setup
         // pgDesc.miss.entryFunctionName      = "__miss__radiance";
         pgDesc.miss.module            = nullptr;
         pgDesc.miss.entryFunctionName = nullptr;
+        if constexpr (TYPE == LinkType::RAY_ONLINE) {
+            if (compileCfg.rayHitMode == RayHitMode::FIRST_HIT_MISS) {
+                // closest-hit is disabled by the ray flags; the payload starts at "hit" and the miss clears it
+                pgDesc.miss.module            = Module;
+                pgDesc.miss.entryFunctionName = "__miss__radiance";
+            }
+        }
 
         // OptixProgramGroup raypg;
         char log[2048];
@@ -842,11 +871,10 @@ namespace RTCD { // Optix Pipeline Setup
             auto& pipeline = streamData.pipeline;
             OPTIX_CHECK(optixPipelineCreate(optixContext, &pipelineCompileOptions, &pipelineLinkOptions,
                 programGroups.data(), (int) programGroups.size(), log, &sizeof_log, &pipeline));
-#ifdef PRINTIT
-            if (sizeof_log > 1) {
+            if (compileCfg.printPipelineLog && sizeof_log > 1) {
                 std::cout << log << std::endl;
             }
-#endif
+            sizeof_log = sizeof(log); // in/out parameter: reset for the next stream's pipeline
 
             OptixStackSizes stack_sizes = {};
             for (unsigned int i = 0; i < programGroups.size(); ++i) {

@@ -47,7 +47,54 @@ extern "C" __global__ void __anyhit__RayData() {
 // flags are identical (hit counts may be lower). No compaction or host read-back of a ray count is needed.
 // Note: no __syncthreads() here. OptiX programs have no CUDA block semantics, barriers are not supported
 // (rejected by OptiX 9 / CUDA 13), and nothing here needs synchronization anyway.
-extern "C" __global__ void __raygen__robotRayCompact() {
+//
+// Hit test variants (selected on the host by OptixCompileConfig::rayHitMode, which picks the raygen entry point).
+// Each only needs yes/no per ray; any-hit is disabled for all of them (the scene triangles are also built with
+// OPTIX_GEOMETRY_FLAG_DISABLE_ANYHIT), so every variant reports a hit exactly when some triangle intersects the
+// segment [0, distance].
+enum RayHitVariant {
+    HIT_CLOSEST        = 0, // optixTrace, closest-hit search, CH sets payload 1 (miss program: none, payload stays 0)
+    HIT_FIRST_CH       = 1, // + TERMINATE_ON_FIRST_HIT
+    HIT_FIRST_MISS     = 2, // TERMINATE_ON_FIRST_HIT | DISABLE_CLOSESTHIT, payload starts at 1, miss clears it
+    HIT_FIRST_TRAVERSE = 3, // optixTraverse + TERMINATE_ON_FIRST_HIT, optixHitObjectIsHit(); no CH / miss runs
+};
+
+template <int VARIANT>
+static __forceinline__ __device__ bool traceHit(const float3& origin, const float3& dir, const float tmax) {
+    if constexpr (VARIANT == HIT_FIRST_TRAVERSE) {
+        optixTraverse(optixLaunchParams.traversable, origin, dir,
+            0.f, // tmin
+            tmax, // tmax
+            0.0f, // rayTime
+            OptixVisibilityMask(255), OPTIX_RAY_FLAG_DISABLE_ANYHIT | OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT,
+            SURFACE_RAY_TYPE, // SBT offset
+            RAY_TYPE_COUNT, // SBT stride
+            SURFACE_RAY_TYPE); // missSBTIndex
+        return optixHitObjectIsHit();
+    } else {
+        unsigned int flags = OPTIX_RAY_FLAG_DISABLE_ANYHIT;
+        unsigned int u0    = 0;
+        if constexpr (VARIANT == HIT_FIRST_CH) {
+            flags |= OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT;
+        } else if constexpr (VARIANT == HIT_FIRST_MISS) {
+            flags |= OPTIX_RAY_FLAG_TERMINATE_ON_FIRST_HIT | OPTIX_RAY_FLAG_DISABLE_CLOSESTHIT;
+            u0 = 1;
+        }
+        optixTrace(optixLaunchParams.traversable, origin, dir,
+            0.f, // tmin
+            tmax, // tmax
+            0.0f, // rayTime
+            OptixVisibilityMask(255), flags,
+            SURFACE_RAY_TYPE, // SBT offset
+            RAY_TYPE_COUNT, // SBT stride
+            SURFACE_RAY_TYPE, // missSBTIndex
+            u0);
+        return u0 == 1;
+    }
+}
+
+template <int VARIANT>
+static __forceinline__ __device__ void robotRays() {
     const rayRobotCfg& cfg = optixLaunchParams.robot;
     const uint total       = optixLaunchParams.totalRayCount;
     const uint stride      = optixGetLaunchDimensions().x;
@@ -77,20 +124,21 @@ extern "C" __global__ void __raygen__robotRayCompact() {
         float distance;
         float3 rayDir = normallength(newTarget - newOrigin, distance);
 
-        unsigned int u0 = 0;
-        optixTrace(optixLaunchParams.traversable, newOrigin, rayDir,
-            0.f, // tmin
-            distance, // tmax
-            0.0f, // rayTime
-            OptixVisibilityMask(255),
-            OPTIX_RAY_FLAG_DISABLE_ANYHIT, // OPTIX_RAY_FLAG_NONE,
-            SURFACE_RAY_TYPE, // SBT offset
-            RAY_TYPE_COUNT, // SBT stride
-            SURFACE_RAY_TYPE, // missSBTIndex
-            u0);
-
-        if (u0 == 1) {
+        if (traceHit<VARIANT>(newOrigin, rayDir, distance)) {
             atomicAdd(hitBuffer + poseIdx, 1);
         }
     }
+}
+
+extern "C" __global__ void __raygen__robotRayCompact() {
+    robotRays<HIT_CLOSEST>();
+}
+extern "C" __global__ void __raygen__robotRayFirstHitCH() {
+    robotRays<HIT_FIRST_CH>();
+}
+extern "C" __global__ void __raygen__robotRayFirstHitMiss() {
+    robotRays<HIT_FIRST_MISS>();
+}
+extern "C" __global__ void __raygen__robotRayFirstHitTraverse() {
+    robotRays<HIT_FIRST_TRAVERSE>();
 }
