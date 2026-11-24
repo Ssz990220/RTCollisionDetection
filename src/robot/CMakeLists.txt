@@ -4,6 +4,7 @@ add_library(rtcd_robot STATIC
   placeholder.cpp
   urdf_chain.h
   urdf_chain.cpp
+  robot_model.cpp
   kinematics.cu
 )
 # kinematics.cu must keep the old stack's CUDA flags (no -use_fast_math, default FMA contraction, no RDC): the
