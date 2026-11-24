@@ -7,7 +7,8 @@
 //                         (+ B-spline control points) of whole trajectories in one launch
 //   sphereCentersTraj     old batchSphrCntrTraj / genSphrTrajKer (robot.cu), after trajectoryLinkPoses
 //   controlPoints         old batchGenControlPoints / genCtrlPtsKern (RTCD/Robot/sweptVolume.cu)
-//   curveSegmentObbs      old genCurveOBB<degree> / genCurveOBBKern (sweptVolume.cu/.inl)
+//   curveSegmentObbs      old genCurveOBB<degree> / genCurveOBBKern (sweptVolume.cu/.inl); degree 1 bit-identical,
+//                         degree 2 with the OBB_3p anchor fix (the old boxes did not contain the segment)
 //   compactSegments       old genIndex + 2x compactCpyCurve (streamCompact.inl) of the curve OBB path, plus the
 //                         compacted segment -> item map the old path was missing (design doc Q5) and the count
 // The only difference to the old kernels: the kinematics table and the spline weights are read from device

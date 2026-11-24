@@ -274,9 +274,10 @@ namespace rtcd::curve {
         }
 
         // ---------------------------------------------------------------------------------------------------------
-        // Old curve segment OBBs (sweptVolume.cu). OBB_3p is kept exactly as in the old code, including its anchor
-        // point choice (see the report / design doc Q5); its __syncthreads() inside divergent code is dropped (it
-        // guarded no shared memory, so no value changes).
+        // Old curve segment OBBs (sweptVolume.cu), used only with OBB culling (not covered by any golden). OBB_1p /
+        // OBB_2p and the degree dispatch are bit-identical to the old code; OBB_3p has two fixes (anchor vertex and
+        // near-collinear points, see there; design doc Q5) so that every box contains its segment. The old OBB_3p's
+        // __syncthreads() inside divergent code is dropped (it guarded no shared memory).
         // ---------------------------------------------------------------------------------------------------------
         __device__ void OBB_1p(const float3& pt, const float r, ObbF3& obb) {
             obb.center         = pt;
@@ -318,27 +319,45 @@ namespace rtcd::curve {
             float3 edge1, edge2, point1;
             float length1;
 
-            if (l1 > l2 && l1 > l3) {
+            // Base = the longest edge (point1 -> point1 + edge1), edge2 = point1 -> third point. Then the third
+            // point projects into [0, length1] on the base and the box below contains the triangle grown by r.
+            // FIX vs the old code (sweptVolume.cu OBB_3p): for the cases "p1p3 longest" and "p2p3 longest" the
+            // old code anchored the box at the wrong vertex (p2 resp. p3) with the wrong second edge, so the box
+            // missed part of the segment and OBB culling dropped real hits (32 of 2847 quad regression items);
+            // ties fell into the third case.
+            if (l1 >= l2 && l1 >= l3) {
                 edge1   = e1;
                 length1 = l1;
                 edge2   = e2;
                 point1  = p1;
-            } else if (l2 > l1 && l2 > l3) {
+            } else if (l2 >= l3) {
                 edge1   = e2;
-                edge2   = e3;
+                edge2   = e1;
                 length1 = l2;
-                point1  = p2;
+                point1  = p1;
             } else {
                 edge1   = e3;
-                edge2   = e1;
+                edge2   = p1 - p2;
                 length1 = l3;
-                point1  = p3;
+                point1  = p2;
             }
 
             float3 x = normalize(edge1);
             float ex = length1 + 2 * r;
 
-            float3 y = normalize(edge2 - x * dot(edge2, x));
+            // FIX vs the old code: (nearly) collinear points -- e.g. two control points of a resting sphere that
+            // differ by rounding only -- made the old normalize() below act on a ~zero vector (NaN or a y axis not
+            // orthogonal to x, i.e. a box that misses the segment). Then use the base edge's box grown by the third
+            // point's distance h from the base line; otherwise orthogonalize y twice (Gram-Schmidt) so the frame is
+            // orthonormal to float precision.
+            const float3 yRaw = edge2 - x * dot(edge2, x);
+            const float h     = length(yRaw);
+            if (!(h > 1e-3f * length1)) {
+                OBB_2p(point1, point1 + edge1, r + h, obb);
+                return;
+            }
+            float3 y = normalize(yRaw);
+            y        = normalize(y - x * dot(y, x));
             float ey = dot(edge2, y) + 2 * r;
 
             float3 z = cross(x, y);
