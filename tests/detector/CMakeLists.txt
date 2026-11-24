@@ -20,3 +20,9 @@ rtcd_add_new_test(test_detector_facade LABEL new_gpu
   LIBS rtcd_detector rtcd_json rtcd_detector_test_ir)
 target_include_directories(test_detector_facade PRIVATE ${PROJECT_SOURCE_DIR}/src)
 target_compile_definitions(test_detector_facade PRIVATE NOMINMAX)
+
+# The graph-prepare experiment of DetectorCore (Track G0, env RTCD_GRAPH_PREPARE=1, off by default) with the real
+# ray backend: flags equal to a checker without it and to the golden, host and device items, 1 / 4 streams.
+rtcd_add_new_test(test_graph_prepare LABEL new_gpu
+  SOURCES test_graph_prepare.cpp
+  LIBS rtcd rtcd_testsupport rtcd_json)

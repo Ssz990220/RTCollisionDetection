@@ -7,6 +7,10 @@
 
 #include <benchmark/benchmark.h>
 
+#include <cstdlib>
+#include <memory>
+#include <string>
+
 using namespace rtcd;
 
 namespace {
@@ -47,6 +51,30 @@ namespace {
         static bench::DeviceBench b(discreteConfig(Mode::Ray));
         run(state, b);
     }
+
+    // Track G0 experiment: BM_RAY with the checker built under RTCD_GRAPH_PREPARE=1 (DetectorCore replays each
+    // batch's zero / staging copy / prepare() as one CUDA graph; off by default). Not an old-stack benchmark.
+    void setGraphPrepareEnv(const char* v) {
+#ifdef _WIN32
+        _putenv_s("RTCD_GRAPH_PREPARE", v);
+#else
+        setenv("RTCD_GRAPH_PREPARE", v, 1);
+#endif
+    }
+    struct DeviceBenchWithGraph {
+        explicit DeviceBenchWithGraph(const CheckerConfig& c) {
+            const char* old         = std::getenv("RTCD_GRAPH_PREPARE");
+            const std::string saved = old ? old : "";
+            setGraphPrepareEnv("1");
+            bench = std::make_unique<bench::DeviceBench>(c);
+            setGraphPrepareEnv(saved.c_str());
+        }
+        std::unique_ptr<bench::DeviceBench> bench;
+    };
+    void BM_RAY_GRAPH(benchmark::State& state) {
+        static DeviceBenchWithGraph b(discreteConfig(Mode::Ray));
+        run(state, *b.bench);
+    }
 } // namespace
 
 BENCHMARK(BM_IAS)
@@ -69,6 +97,21 @@ BENCHMARK(BM_RAY)
     ->MinWarmUpTime(4);
 
 int main(int argc, char** argv) {
+    // --rtcd_graph_bench (Track G0 experiment): also register BM_RAY_GRAPH (= BM_RAY under RTCD_GRAPH_PREPARE=1).
+    // Off by default so benchmark.sh / benchmark.bat outputs keep exactly the old benchmark set.
+    for (int i = 1; i < argc; ++i) {
+        if (std::string(argv[i]) == "--rtcd_graph_bench") {
+            for (int j = i; j + 1 < argc; ++j) argv[j] = argv[j + 1];
+            --argc;
+            benchmark::RegisterBenchmark("BM_RAY_GRAPH", BM_RAY_GRAPH)
+                ->RangeMultiplier(2)
+                ->Range(1 << 0, 1 << 12)
+                ->Unit(benchmark::kMicrosecond)
+                ->UseRealTime()
+                ->MinWarmUpTime(4);
+            break;
+        }
+    }
     bench::setup(argc, argv);
     benchmark::Initialize(&argc, argv);
     if (benchmark::ReportUnrecognizedArguments(argc, argv)) {

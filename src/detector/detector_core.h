@@ -28,6 +28,11 @@
 #include <thread>
 #include <vector>
 
+// CUDA graph handle types (cudaGraph_t = CUgraph_st*, ...), without including a CUDA header here.
+struct CUgraph_st;
+struct CUgraphExec_st;
+struct CUgraphNode_st;
+
 namespace rtcd::detail {
 
     class OptixProgramPipeline;
@@ -72,7 +77,25 @@ namespace rtcd::detail {
         // InvalidArgument.
         void validateHostItems(const HostItems& items) const;
 
+        // Experiment (Track G0, off by default): replay the CUDA part of a batch (zero hits, staging copy, prepare())
+        // as a CUDA graph. On only when env RTCD_GRAPH_PREPARE=1 at construction AND the backend's prepare() issues
+        // plain CUDA work only (prototype gate: Mode::Ray; OptiX calls cannot be captured, see
+        // tests/experiments/graph_capture). True if this checker uses it.
+        bool graphPrepareEnabled() const noexcept { return graphPrepare_; }
+
     private:
+        // A captured "zero hits + staging copy + prepare()" sequence of one stream for one batch item count.
+        struct PrepareGraph {
+            std::uint32_t itemCount = 0;
+            CUgraph_st* graph       = nullptr; // kept: owns the staging-copy node handle
+            CUgraphExec_st* exec    = nullptr;
+            CUgraphNode_st* stagingNode = nullptr;
+            DevicePtr stagingSrc    = 0;       // source address the staging-copy node currently reads
+            LaunchPlan plan{};                 // prepare()'s plan at capture (params -> `params` below)
+            std::array<unsigned char, kMaxLaunchParamsBytes> params{};
+        };
+        static constexpr std::size_t kMaxPrepareGraphs = 8; // per stream (item counts in use), oldest evicted
+
         struct StreamState {
             DeviceBuffer staging; // maxBatchSize * floatsPerItem floats (BatchView::items)
             DeviceBuffer hits;    // maxBatchSize uint32 (BatchView::hitCounts)
@@ -83,6 +106,7 @@ namespace rtcd::detail {
             bool uploadedValid          = false;
             // Counters of the running check.
             std::uint32_t batches = 0, launches = 0, hostSyncs = 0, paramUploads = 0;
+            std::vector<std::unique_ptr<PrepareGraph>> graphs; // graph-prepare experiment only
         };
         // Where the batches read their items: item i starts at base + i * strideBytes.
         struct ItemSource {
@@ -96,6 +120,10 @@ namespace rtcd::detail {
         // Steps 4-8 of the design doc's call sequence; `results` receives `count` uint32 counters.
         void run(std::uint32_t count, const ItemSource& source, DevicePtr results);
         void runBatch(std::uint32_t batch, std::uint32_t count, const ItemSource& source, DevicePtr results);
+        // Graph-prepare experiment: launch (capturing it first if needed) the graph of steps 7.1-7.3 for `view` on
+        // stream `s`; returns the plan prepare() returned at capture.
+        LaunchPlan graphPrepare(std::uint32_t s, const BatchView& view, DevicePtr src, std::size_t stagingBytes);
+        void destroyPrepareGraphs() noexcept;
         void drainStreams() noexcept;
         void synchronizeStreams(); // checked; synchronizes every stream even if one fails, throws the first error
 
@@ -116,6 +144,7 @@ namespace rtcd::detail {
         PinnedHostBuffer download_; // maxItemsPerCheck uint32
         std::vector<float> warmupItems_;
         CheckStats stats_;
+        bool graphPrepare_ = false;
         std::atomic<bool> abort_{false};
         std::mutex errorMutex_;
         std::exception_ptr firstError_;
