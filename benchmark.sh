@@ -1,6 +1,6 @@
 # If the folder does not exist, create one
 mkdir -p ./data/Benchmark/result/discrete
-mkdir -p ./data/Benchmark/result/curve
+mkdir -p ./data/Benchmark/result/curve_loop
 # Execute the scripts, takes about few minutes
 ./build/bin/Benchmarks/benchmarkDenseShelf --benchmark_out=./data/Benchmark/result/discrete/denseShelf.json
 ./build/bin/Benchmarks/benchmarkShelf --benchmark_out=./data/Benchmark/result/discrete/shelf.json

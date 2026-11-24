@@ -86,7 +86,7 @@ extern "C" __global__ void __raygen__doubleside() {
 
     float3 origin, target;
 
-    if (idx & 1 == 0) {
+    if ((idx & 1) == 0) {
         // forward ray
         origin = optixLaunchParams.verticesBuffer[rayId * 2];
         target = optixLaunchParams.verticesBuffer[rayId * 2 + 1];
