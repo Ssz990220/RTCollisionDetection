@@ -1,6 +1,11 @@
 # rtcd_core: CUDA/OptiX context, streams, device buffers, errors, CUDA algorithms (scan, compaction, ...).
 add_library(rtcd_core STATIC
-  placeholder.cu
+  core_internal.h
+  errors.cpp
+  logger.cpp
+  optix_function_table.cpp  # alone in its object file on purpose (see the file)
+  device_buffer.cpp
+  context.cpp
 )
 target_include_directories(rtcd_core
   PUBLIC  ${PROJECT_SOURCE_DIR}/include
