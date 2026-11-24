@@ -9,8 +9,8 @@
 //
 // Construction: resolves and validates the config, checks it against the robot / scene, leases numStreams
 // streams from the Context, creates the backend for config.mode (which allocates everything), builds the OptiX
-// modules / program groups / one pipeline / SBT from the backend's ProgramSet, allocates the input staging and
-// result buffers for maxItemsPerCheck, starts the worker threads (HostDispatch::ThreadPerStream). Nothing is
+// modules / program groups / one pipeline / SBT from the backend's ProgramSet, allocates the pinned input / result
+// buffers for maxItemsPerCheck, starts the worker threads (HostDispatch::ThreadPerStream). Nothing is
 // allocated later. Throws ConfigError, IoError, CapacityError, UnsupportedError, CudaError, OptixError.
 //
 // check(): blocking. Splits the items into batches of maxBatchSize (batch b = items [b*maxBatchSize, ...),
@@ -80,8 +80,10 @@ namespace rtcd {
         const RobotModel& robot() const noexcept;
         const Scene& scene() const noexcept;
 
-        // Host items -> host results. Uploads the items (synchronous copy into the staging buffer), checks,
-        // downloads. Allocates only the returned vectors.
+        // Host items -> host results. Packs the items into a pinned host buffer that the GPU reads in place and
+        // gets the counters back through a second pinned buffer (no copy-engine transfers: on Windows a small
+        // H2D / D2H copy costs 20-60 us of latency, a mapped read / write by a kernel a few us;
+        // CheckerConfig::mappedHostTransfer = false restores upload + download). Allocates only the returned vectors.
         CheckResult check(const HostItems& items, ResultDetail detail = ResultDetail::Flags);
 
         // Same, writing into caller memory (no allocation). collides.size() and, if not empty, hitCounts.size()

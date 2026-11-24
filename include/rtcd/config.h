@@ -188,6 +188,12 @@ namespace rtcd {
         // prepare) as one CUDA graph launch per batch; applies only to batches for which the backend reports its
         // prepare as capturable (Backend::prepareCapturable); never changes results. Added 2026-11-24.
         bool graphPrepare = true;
+        // [runtime] "mapped_host_transfer": host check() lets the GPU read the packed items from, and write the
+        // counters to, mapped pinned host memory instead of using copy-engine uploads / downloads; never changes
+        // results; checkDevice() is unaffected. false = synchronous upload into a device input buffer and a
+        // download of the counters. Measured on Windows 11 / RTX 5080: host check N=1 ray 34.7 vs 72.0 us, neutral
+        // at N=1024; not yet measured on Linux. Added 2026-11-24.
+        bool mappedHostTransfer = true;
         OptixOptions optix = OptixOptions::buildDefault();     // "optix"
         MeshOptions mesh;                                      // "mesh"   (read only when mode == Mesh)
         RayOptions ray;                                        // "ray"    (read only when mode == Ray)

@@ -4,7 +4,8 @@
 // batch had the same target (ray: graph keyed by the hit-count address), and runs single-batch checks on the
 // calling thread. Covered: repeated checks into the SAME result buffer, alternating between TWO result buffers and
 // TWO input buffers, single- and multi-batch checks (streams with one and with several batches), strided device
-// items (staging), host check() between device checks, both HostDispatch modes.
+// items (staging), host check() between device checks (also strided host items), both HostDispatch modes, and
+// CheckerConfig::mappedHostTransfer on (zero-copy host checks) and off (upload + download).
 #ifndef NOMINMAX
 #define NOMINMAX
 #endif
@@ -86,9 +87,14 @@ TEST_P(AddressRules, FlagsMatchGoldenForEveryAddressPattern) {
     DeviceBuffer inS = DeviceBuffer::fromHost(std::span<const float>(strided));
     DeviceBuffer r0(N * sizeof(std::uint32_t)), r1(N * sizeof(std::uint32_t));
 
-    for (HostDispatch dispatch : {HostDispatch::SingleThread, HostDispatch::ThreadPerStream}) {
-        CheckerConfig c = e.setup.checker;
-        c.hostDispatch  = dispatch;
+    for (int variant = 0; variant < 4; ++variant) {
+        const HostDispatch dispatch = variant % 2 == 0 ? HostDispatch::SingleThread : HostDispatch::ThreadPerStream;
+        const bool mapped           = variant < 2; // CheckerConfig::mappedHostTransfer (host checks only)
+        SCOPED_TRACE(std::string(mapped ? "mapped host transfer" : "copy host transfer") + ", dispatch "
+                     + std::to_string(int(dispatch)));
+        CheckerConfig c       = e.setup.checker;
+        c.hostDispatch        = dispatch;
+        c.mappedHostTransfer  = mapped;
         CollisionChecker checker(ctx(), c, e.robot, e.scene);
         const std::uint32_t B = checker.config().maxBatchSize;
         const std::uint32_t S = checker.config().numStreams;
@@ -114,8 +120,14 @@ TEST_P(AddressRules, FlagsMatchGoldenForEveryAddressPattern) {
             }
             device(inS, stride, r0, n, e.golden, "strided");
             device(inS, stride, r0, n, e.golden, "strided again");
-            const CheckResult h = checker.check(HostItems{e.inputs, n, 0});
-            EXPECT_EQ(support::diffFlags(h.collides, e.golden, n).differing, 0u) << "host check n " << n;
+            for (int rep = 0; rep < 2; ++rep) {
+                const CheckResult h = checker.check(HostItems{e.inputs, n, 0});
+                EXPECT_EQ(support::diffFlags(h.collides, e.golden, n).differing, 0u) << "host check n " << n;
+                const CheckResult hb = checker.check(HostItems{rotated, n, 0});
+                EXPECT_EQ(support::diffFlags(hb.collides, goldenB, n).differing, 0u) << "host check B n " << n;
+            }
+            const CheckResult hs = checker.check(HostItems{strided, n, stride});
+            EXPECT_EQ(support::diffFlags(hs.collides, e.golden, n).differing, 0u) << "strided host check n " << n;
             device(inB, 0, r0, n, goldenB, "after host check");
         }
     }

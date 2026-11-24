@@ -78,6 +78,7 @@ TEST(ConfigDefaults, MatchTheSchemaTable) {
     EXPECT_FALSE(c.sceneEdges.has_value());
     EXPECT_EQ(c.verbosity, LogLevel::Warning);
     EXPECT_TRUE(c.graphPrepare);
+    EXPECT_TRUE(c.mappedHostTransfer);
 #if !defined(_DEBUG) && !defined(DEBUG)
     EXPECT_EQ(c.optix.optLevel, OptixOptions::OptLevel::Default);
     EXPECT_EQ(c.optix.debugLevel, OptixOptions::DebugLevel::Default);
@@ -403,6 +404,7 @@ TEST(ConfigResolved, ExplicitValuesAreKept) {
         c.curve.geometryFlags       = m == Mode::QuadraticCurve ? kGeometryFlagNone : kGeometryFlagRequireSingleAnyHitCall;
         c.curve.refit               = RefitPolicy{RefitPolicy::Kind::Every, 3};
         c.graphPrepare              = false;
+        c.mappedHostTransfer        = false;
         const CheckerConfig r       = c.resolved();
         EXPECT_EQ(r.obbCulling, Toggle::Off);
         EXPECT_EQ(r.sceneEdges, c.sceneEdges);
@@ -414,6 +416,7 @@ TEST(ConfigResolved, ExplicitValuesAreKept) {
         EXPECT_EQ(r.numStreams, c.numStreams);
         EXPECT_EQ(r.maxBatchSize, c.maxBatchSize);
         EXPECT_FALSE(r.graphPrepare);
+        EXPECT_FALSE(r.mappedHostTransfer);
         EXPECT_EQ(r.curve.splineWeightsDir, c.curve.splineWeightsDir);
         EXPECT_EQ(r.mesh.parkTransform.m, c.mesh.parkTransform.m);
     }

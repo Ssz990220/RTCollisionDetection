@@ -21,6 +21,9 @@
 > **graph_prepare / prepareCapturable added 2026-11-24** (Track G0, authorized by the owner through main):
 > `CheckerConfig::graphPrepare` (JSON `graph_prepare`, default true, 3.7 / 7.1) and the virtual
 > `Backend::prepareCapturable(itemCount)` with a default of false (3.10, section 4 step 7); no other declaration changed.
+> **BatchView address rules relaxed 2026-11-24** (Track G2, comment-only, approved by main): items may be read in
+> place, hit counts may be counted into the result range, single-batch checks run on the calling thread (3.7
+> `HostDispatch`, 3.10 `BatchView` / `prepareCapturable` (b), section 4 steps 3, 6, 7, 9; Q3 / Q4 settled).
 > From here on the contract -- every header under `include/rtcd/` (public and `internal/`) and this document --
 > is changed only by main. **Change procedure:** a module agent that needs a header change does not make it; it sends main a request naming the file, the exact declaration (old and new
 > text) and the reason. Main decides, applies the change in one commit to the contract, updates this document in
@@ -203,7 +206,8 @@ Purpose: all checker options as plain data, each field documented with default, 
 `CurveOptions` (trajectory / control points, end points, GAS build, `RefitPolicy`, `autoRefitMaxBatches`
 (-1 = 2 for linear, 1 otherwise), `geometryFlags` (`std::optional`, nullopt = "auto" = single any-hit for
 quadratic, none for linear and cubic, as the old `curveDefaultGeometryFlags` since `4ee064e`), spline weights dir). Top level: mode, `numStreams = 4`,
-`hostDispatch = ThreadPerStream`, `maxBatchSize = 1024`, `maxItemsPerCheck = 8192`, `obbCulling = Auto`
+`hostDispatch = ThreadPerStream` (one worker thread per stream; since 2026-11-24 a check with a single batch is
+issued on the calling thread, which saves the worker wake-up and join, 6-18 us per check on Windows), `maxBatchSize = 1024`, `maxItemsPerCheck = 8192`, `obbCulling = Auto`
 (On for Mesh / Ray, Off for curves), `collapseRootLinkObb = true` (old `SKIP_BASE`), `sceneEdges = auto`
 (Unique for Mesh, Loop for curves), verbosity, `graphPrepare = true` (added 2026-11-24: replay the capturable part of
 a batch -- zeroing, staging copy, the backend's prepare -- as one CUDA graph launch per batch, only for batches whose
@@ -276,14 +280,21 @@ Purpose: the seam between the mode-agnostic detector core and the backends.
 - `StreamContext {index, stream}`, `CheckInfo {itemCount, batchCount}`, `BatchView {batchIndex, firstItem,
   itemCount, items, hitCounts}`, `LaunchPlan {launch, traversable, width/height/depth, params, paramsBytes,
   raygen}`.
-- Result location: `BatchView::hitCounts` (per-stream, zeroed by the core, stable address) is the only result
-  location; programs `atomicAdd` per batch-local item; the core copies it to the check result.
+- Result location: `BatchView::hitCounts` (zeroed by the core) is the only result location; programs `atomicAdd`
+  per batch-local item. It is either the stream's own counter buffer (the core then copies it into the check
+  result) or, since 2026-11-24, the check's result range at `firstItem` itself: the core counts there directly when
+  the stream's previous batch had the same target address (repeated checks into one result buffer), so params
+  holding the pointer stay byte-identical; host checks (results in a pinned host buffer) never count directly.
+- Items: `BatchView::items` is either the stream's staging buffer (graph-replayed batches and strided input) or,
+  since 2026-11-24, the check's packed input itself at the batch's first item (no staging copy); for host checks
+  that input is a pinned host buffer the GPU reads through its mapping. Both addresses may change from batch to
+  batch: backends read them from every `BatchView` and never cache them (none of the three does).
 - `Backend`: `mode()`, `programs()`, `beginCheck()` (host only, per check), `prepare()` (per batch),
   `synchronizesHost(itemCount)` (exact predicate: true iff that prepare blocks the host),
   `prepareCapturable(itemCount)` (added 2026-11-24; virtual with default false, so a backend that does not
   override it is never captured): true iff that prepare (a) enqueues only plain CUDA work on its stream (no OptiX
   API call of any kind, no host synchronization, no device allocation) and (b) returns a plan and params that
-  depend only on (stream index, itemCount), so replaying the captured work equals calling prepare again on new
+  depend only on (stream index, itemCount, `batch.hitCounts.ptr`; the core keys its graphs by all three), so replaying the captured work equals calling prepare again on new
   contents of the same buffers. Capturable implies not synchronizing (the core treats both true as an internal
   error). Hard rule, measured on OptiX 9.1 / driver 610.88 (`tests/experiments/graph_capture`): an OptiX call
   inside a stream capture is silently dropped from the graph (`optixLaunch`: only a 64-byte param copy recorded,
@@ -298,8 +309,8 @@ Purpose: the seam between the mode-agnostic detector core and the backends.
   `prepare` (the calling thread, and each worker thread with `ThreadPerStream`, section 4 steps 2 and 6), so
   backends do not call `makeCurrent()` there (they do in their constructors, which the core also calls with the
   device current).
-- Loop order per batch, as in section 4 step 7 and the `backend.h` header comment: zero hit counts, staging copy,
-  `prepare`, params upload + launch, result copy.
+- Loop order per batch, as in section 4 step 7 and the `backend.h` header comment: zero hit counts, staging copy
+  (unless the items are read in place), `prepare`, params upload + launch, result copy (unless counted directly).
 - Factories `createMeshBackend / createRayBackend / createCurveBackend(BackendCreateInfo)`; the core switches on the
   mode once, at construction.
 Ownership: the checker owns the backend (`unique_ptr`) and destroys it before Scene / RobotModel / Context

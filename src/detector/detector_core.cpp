@@ -85,12 +85,21 @@ namespace rtcd::detail {
             st.hits.allocate(std::size_t(cfg_.maxBatchSize) * sizeof(std::uint32_t));
             st.params.allocate(kMaxLaunchParamsBytes);
         }
-        // Host path (checkHost): items packed into a pinned buffer that the GPU reads in place (zero-copy), counters
-        // written by the batches straight into a pinned buffer (no copy-engine transfer, see detector_kernels.h).
-        upload_.allocate(std::size_t(cfg_.maxItemsPerCheck) * fpiBytes);
+        // Host path (checkHost). mappedHostTransfer: items packed into a pinned buffer that the GPU reads in place
+        // (zero-copy), counters written by the batches straight into a pinned buffer (no copy-engine transfer, see
+        // detector_kernels.h). Otherwise: a device input buffer (synchronous upload) and a device result buffer
+        // downloaded into the pinned buffer. Both pinned buffers are cudaMallocHost memory (with unified addressing
+        // mapped into every context of the process, device address = cudaHostGetDevicePointer, usable from any
+        // stream and thread); a failed allocation throws CudaError here, at construction.
         download_.allocate(std::size_t(cfg_.maxItemsPerCheck) * sizeof(std::uint32_t));
-        uploadDev_   = mappedDevicePtr(upload_.data());
-        downloadDev_ = mappedDevicePtr(download_.data());
+        if (cfg_.mappedHostTransfer) {
+            upload_.allocate(std::size_t(cfg_.maxItemsPerCheck) * fpiBytes);
+            uploadDev_   = mappedDevicePtr(upload_.data());
+            downloadDev_ = mappedDevicePtr(download_.data());
+        } else {
+            input_.allocate(std::size_t(cfg_.maxItemsPerCheck) * fpiBytes);
+            result_.allocate(std::size_t(cfg_.maxItemsPerCheck) * sizeof(std::uint32_t));
+        }
 
         if (cfg_.hostDispatch == HostDispatch::ThreadPerStream) {
             workers_ = std::make_unique<StreamWorkers>(cfg_.numStreams);
@@ -193,17 +202,24 @@ namespace rtcd::detail {
         mark(0, Phase::Entry);
         uploadHostItems(items);
         mark(0, Phase::Upload);
-        // The batches read the items from the pinned upload buffer and write their counters into the pinned
-        // download buffer through the GPU's mapping of them (no copy-engine transfer, detector_kernels.h).
-        resultsOnHost_ = true;
-        try {
-            run(n, ItemSource{uploadDev_, layout_.floatsPerItem() * sizeof(float)}, downloadDev_);
-        } catch (...) {
+        const std::size_t fpiBytes = layout_.floatsPerItem() * sizeof(float);
+        if (cfg_.mappedHostTransfer) {
+            // The batches read the items from the pinned upload buffer and write their counters into the pinned
+            // download buffer through the GPU's mapping of them (no copy-engine transfer, detector_kernels.h).
+            resultsOnHost_ = true;
+            try {
+                run(n, ItemSource{uploadDev_, fpiBytes}, downloadDev_);
+            } catch (...) {
+                resultsOnHost_ = false;
+                throw;
+            }
             resultsOnHost_ = false;
-            throw;
+            // Step 9: the streams are synchronized, so the counters are in the pinned buffer.
+        } else {
+            run(n, ItemSource{input_.ptr(), fpiBytes}, result_.ptr());
+            // Step 9: one download of the n counters into the pinned buffer (the streams are synchronized).
+            result_.download(download_.data(), std::size_t(n) * sizeof(std::uint32_t));
         }
-        resultsOnHost_ = false;
-        // Step 9: the streams are synchronized, so the counters are in the pinned buffer.
         mark(0, Phase::Download);
         const std::span<const std::uint32_t> counts = download_.as<std::uint32_t>().first(n);
         for (std::uint32_t i = 0; i < n; ++i) {
@@ -241,10 +257,21 @@ namespace rtcd::detail {
     // -----------------------------------------------------------------------------------------------------------
 
     void DetectorCore::uploadHostItems(const HostItems& items) {
-        // Step 3: pack the n items into the pinned upload buffer (host memcpy; the previous check has finished with
-        // it: every check ends with its streams synchronized, a failed one with all streams drained).
         const std::size_t fpi = layout_.floatsPerItem();
-        float* dst            = static_cast<float*>(upload_.data());
+        if (!cfg_.mappedHostTransfer) {
+            // Step 3 (copy path): one synchronous copy of the n items into the device input buffer.
+            const std::size_t fpiBytes = fpi * sizeof(float);
+            if (items.stride == 0 || items.stride == fpi) {
+                input_.upload(items.floats.data(), items.count * fpiBytes);
+            } else {
+                RTCD_CUDA_CHECK(cudaMemcpy2D(toPtr(input_.ptr()), fpiBytes, items.floats.data(),
+                    items.stride * sizeof(float), fpiBytes, items.count, cudaMemcpyHostToDevice));
+            }
+            return;
+        }
+        // Step 3 (mapped): pack the n items into the pinned upload buffer (host memcpy; the previous check has
+        // finished with it: every check ends with its streams synchronized, a failed one with all streams drained).
+        float* dst = static_cast<float*>(upload_.data());
         if (items.stride == 0 || items.stride == fpi) {
             std::memcpy(dst, items.floats.data(), items.count * fpi * sizeof(float));
         } else {
