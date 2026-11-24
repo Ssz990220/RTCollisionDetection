@@ -31,6 +31,9 @@ namespace rtcd::internal {
 
         // Uploads plan.params to an internal buffer and launches on `stream` (no-op if !plan.launch).
         // Asynchronous; the caller synchronizes.
+        // Threading: launch() may be called concurrently from different host threads for DIFFERENT streams,
+        // including each stream's first launch (which creates that stream's param buffer). Launches on the same
+        // stream must come from one thread at a time, in order (as prepare() calls of one stream index).
         void launch(StreamHandle stream, const LaunchPlan& plan);
 
     private:

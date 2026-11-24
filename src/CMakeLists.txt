@@ -17,8 +17,8 @@
 # through the PRIVATE include path (src/). No global include_directories, no CU_SRC-style source lists: a .cu
 # belongs to exactly one library and is compiled once. Each backend embeds its own OptiX programs with
 # rtcd_add_optix_ir (cmake/RTCDTargets.cmake); there is no shared programs library.
-# Placeholder sources (placeholder.cpp / placeholder.cu) only exist so the skeleton builds; delete a library's
-# placeholder when the first real source is added.
+# Every library above has real sources; the skeleton-stage placeholder sources (placeholder.cpp / placeholder.cu) are gone.
+# A new library starts with at least one real source file.
 
 add_subdirectory(core)
 add_subdirectory(config)

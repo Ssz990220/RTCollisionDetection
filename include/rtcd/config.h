@@ -103,9 +103,12 @@ namespace rtcd {
         RayHitMode hitMode = RayHitMode::ClosestHit;
     };
 
-    // Refit policy of the curve GAS (old batchOptixCurveRobot::setRefitPolicy). Collision flags never depend on
-    // it; only build vs. trace cost does. A refit (OPTIX_BUILD_OPERATION_UPDATE) is only ever done when the batch
-    // has the same item count as the last full build on that stream; otherwise the GAS is rebuilt.
+    // Refit policy of the curve GAS (old batchOptixCurveRobot::setRefitPolicy). Mostly a build vs. trace cost
+    // trade-off, but a refitted GAS can differ from a fresh build and flip grazing hits: measured at
+    // N = 4096 on the quadratic regression inputs, {"every": 3} reports two extra collisions (items 4065 and
+    // 3528), in the old and the new stack alike; auto / always / never showed no flip in 324 compared checks.
+    // The goldens are recorded with "auto". A refit (OPTIX_BUILD_OPERATION_UPDATE) is only ever done when the
+    // batch has the same item count as the last full build on that stream; otherwise the GAS is rebuilt.
     struct RefitPolicy {
         enum class Kind : std::uint8_t {
             Auto,   // "auto": refit while the check has <= CurveOptions::autoRefitMaxBatches batches, else rebuild
