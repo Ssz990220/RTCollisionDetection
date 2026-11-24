@@ -154,9 +154,10 @@ namespace rtcd::detail {
         std::unique_ptr<Backend> backend_;
         std::unique_ptr<OptixProgramPipeline> pipeline_;
         std::vector<StreamState> streams_;
-        DeviceBuffer input_;      // maxItemsPerCheck packed items (host path)
-        DeviceBuffer result_;     // maxItemsPerCheck uint32 (host path)
-        PinnedHostBuffer download_; // maxItemsPerCheck uint32
+        PinnedHostBuffer upload_;   // maxItemsPerCheck packed items (host path; read by the GPU in place)
+        DevicePtr uploadDev_ = 0, downloadDev_ = 0; // device addresses of the two pinned buffers
+        PinnedHostBuffer download_; // maxItemsPerCheck uint32 (host path; written by the GPU in place)
+        bool resultsOnHost_ = false; // the running check writes its counters into download_ (checkHost)
         std::vector<float> warmupItems_;
         CheckStats stats_;
         std::atomic<bool> abort_{false};

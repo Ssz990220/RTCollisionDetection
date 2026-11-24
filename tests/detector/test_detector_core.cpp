@@ -215,19 +215,14 @@ TEST_P(CoreTest, BatchLoopOrderStreamMappingAndResults) {
         }
         EXPECT_EQ(c.items - base, DevicePtr(c.first) * fpi * sizeof(float)) << "call " << k;
     }
-    // Hit counters: streams 0 and 1 run two batches per check (different result targets): always their own
-    // buffer, so the same address in both checks. Stream 2 runs batch 2 only: in the second check its target
-    // repeats and it counts straight into the result range, i.e. at another address than in the first check.
-    // (Exact addresses: AddressRulesItemsInPlaceAndDirectHitCounts.)
+    // Hit counters of a host check: its results go to a pinned host buffer, which is never counted into directly,
+    // so every batch uses its stream's own counters: one address per stream in both checks. (Device checks and
+    // counting into the result range: AddressRulesItemsInPlaceAndDirectHitCounts.)
     for (std::size_t k = 5; k < 10; ++k) {
         const auto& c = fake->calls[k];
         for (std::size_t j = 0; j < 5; ++j) {
-            if (fake->calls[j].batch == c.batch) {
-                if (c.streamIndex == 2) {
-                    EXPECT_NE(fake->calls[j].hitCounts, c.hitCounts);
-                } else {
-                    EXPECT_EQ(fake->calls[j].hitCounts, c.hitCounts);
-                }
+            if (fake->calls[j].streamIndex == c.streamIndex) {
+                EXPECT_EQ(fake->calls[j].hitCounts, c.hitCounts);
             }
         }
     }
@@ -750,9 +745,9 @@ TEST_P(CoreTest, GraphPrepareCapturesOncePerStreamAndItemCount) {
     o.capturableThreshold = 1;
     ASSERT_TRUE(cfg.graphPrepare); // default on
     auto core = makeCore(o, &fake);
-    // batches 5 5 5 5 3 on streams 0 1 2 0 1: graphs (0,5) (1,5) (2,5) (1,3) with the streams' own hit counters,
-    // plus (2,5) counting into the result range from the second check on (stream 2's only batch repeats its
-    // target), i.e. one graph per (stream, item count, hit-count address)
+    // batches 5 5 5 5 3 on streams 0 1 2 0 1: graphs (0,5) (1,5) (2,5) (1,3), all with the streams' own hit
+    // counters (host checks never count into their pinned result buffer directly; graphs keyed by the hit-count
+    // address are covered by AddressRulesItemsInPlaceAndDirectHitCounts)
     const std::uint32_t n = 23;
     for (int rep = 0; rep < 3; ++rep) {
         const auto in = items(n, rep == 1 ? times3 : plus100); // new contents in the same buffers
@@ -763,7 +758,7 @@ TEST_P(CoreTest, GraphPrepareCapturesOncePerStreamAndItemCount) {
         EXPECT_EQ(core->lastStats().batches, 5u);
         EXPECT_EQ(core->lastStats().launches, 5u);
     }
-    EXPECT_EQ(fake->calls.size(), 5u) << "prepare() must run once per (stream, item count, hits), at capture";
+    EXPECT_EQ(fake->calls.size(), 4u) << "prepare() must run once per (stream, item count, hits), at capture";
     EXPECT_EQ(fake->begins.size(), 3u); // beginCheck still once per check
 
     // device items at another address: the staging-copy node is re-pointed
@@ -783,7 +778,7 @@ TEST_P(CoreTest, GraphPrepareCapturesOncePerStreamAndItemCount) {
     for (std::uint32_t i = 0; i < n; ++i) {
         EXPECT_EQ(cs[i], 107 + i);
     }
-    EXPECT_EQ(fake->calls.size(), 5u); // other targets: back to the (2,5) graph with the own counters
+    EXPECT_EQ(fake->calls.size(), 4u); // device and host checks into other targets replay the same graphs
     // strided DEVICE items take the direct path (prepare() called for every batch)
     DeviceBuffer dStrided = DeviceBuffer::fromHost(std::span<const float>(strided));
     core->checkDevice(DeviceItems{dStrided.ptr(), n, stride}, DeviceSpan<std::uint32_t>{dHits.ptr(), n});
@@ -791,7 +786,7 @@ TEST_P(CoreTest, GraphPrepareCapturesOncePerStreamAndItemCount) {
     for (std::uint32_t i = 0; i < n; ++i) {
         EXPECT_EQ(out[i], 107 + i) << "strided device item " << i;
     }
-    EXPECT_EQ(fake->calls.size(), 5u + 5u);
+    EXPECT_EQ(fake->calls.size(), 4u + 5u);
 
     // graphPrepare = false: prepare() every batch
     CheckerConfig off = cfg;

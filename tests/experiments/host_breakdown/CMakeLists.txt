@@ -10,3 +10,10 @@ target_compile_definitions(rtcd_exp_host_breakdown PRIVATE NOMINMAX)
 set_target_properties(rtcd_exp_host_breakdown PROPERTIES
   FOLDER "rtcd/experiments"
   RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/experiments)
+
+# rtcd_exp_transfer_probe: host cost of small H2D / D2H transfers by method (copy engine vs zero-copy kernel).
+add_executable(rtcd_exp_transfer_probe EXCLUDE_FROM_ALL transfer_probe.cu)
+target_link_libraries(rtcd_exp_transfer_probe PRIVATE CUDA::cudart)
+set_target_properties(rtcd_exp_transfer_probe PROPERTIES
+  FOLDER "rtcd/experiments"
+  RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin/experiments)

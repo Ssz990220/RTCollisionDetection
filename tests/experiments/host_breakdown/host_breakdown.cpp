@@ -29,8 +29,11 @@
 #include <support/inputs.h>
 #include <support/paths.h>
 
+#include <cuda_runtime.h>
+
 #include <algorithm>
 #include <chrono>
+#include <cstring>
 #include <cstdio>
 #include <iostream>
 #include <map>
@@ -66,6 +69,7 @@ namespace {
         bool probeSync = true;
         std::string overrides;
         bool tables = true;
+        bool emulateHost = false;
         // Each variant = extra rtcd::applyOverrides text on top of the mode's config ("" = as is); one checker per
         // variant, all alternated rep by rep.
         std::vector<std::string> variants{""};
@@ -212,6 +216,7 @@ int main(int argc, char** argv) {
         else if (a == "--probe-sync") o.probeSync = v != "0";
         else if (a == "--override") o.overrides = v;
         else if (a == "--tables") o.tables = v != "0";
+        else if (a == "--emulate-host") o.emulateHost = v != "0";
         else if (a == "--variants") {
             o.variants.clear();
             std::stringstream ss(v);
@@ -260,6 +265,69 @@ int main(int argc, char** argv) {
             DeviceBuffer items(core.config().maxItemsPerCheck * fpi * sizeof(float));
             DeviceBuffer counts(core.config().maxItemsPerCheck * sizeof(std::uint32_t));
             std::vector<std::uint8_t> flags(core.config().maxItemsPerCheck);
+
+            if (o.emulateHost) {
+                // Host-path alternatives built from checkDevice (end to end: host items in, host flags out).
+                PinnedHostBuffer pin(core.config().maxItemsPerCheck * fpi * sizeof(float));
+                PinnedHostBuffer pinCounts(core.config().maxItemsPerCheck * sizeof(std::uint32_t));
+                void* pinDev = nullptr;
+                cudaHostGetDevicePointer(&pinDev, pin.data(), 0);
+                const StreamHandle s0 = core.streams()[0].stream;
+                const char* names[] = {"library checkHost", "pageable upload + checkDevice + cudaMemcpy D2H",
+                    "pinned zero-copy items + checkDevice + cudaMemcpy D2H",
+                    "pinned zero-copy items + checkDevice + async D2H on stream 0 + sync",
+                    "pageable upload + checkDevice + async D2H on stream 0 + sync"};
+                constexpr int M = 5;
+                for (const std::size_t n : o.ns) {
+                    std::vector<std::vector<double>> t(M);
+                    std::vector<float> host(n * fpi);
+                    std::vector<std::uint8_t> f(n), ref(n);
+                    std::vector<std::uint32_t> dl(n);
+                    std::size_t mism = 0;
+                    for (int r = 0; r < o.warmup + o.reps; ++r) {
+                        for (std::size_t k = 0; k < n; ++k) {
+                            const std::size_t idx = rng() % poolItems;
+                            std::copy_n(pool.begin() + std::ptrdiff_t(idx * fpi), fpi, host.begin() + std::ptrdiff_t(k * fpi));
+                        }
+                        for (int j = 0; j < M; ++j) {
+                            const int mth = (j + r) % M;
+                            const auto t0 = std::chrono::steady_clock::now();
+                            if (mth == 0) {
+                                core.checkHost(HostItems{host, n, 0}, std::span<std::uint8_t>(f), {});
+                            } else {
+                                DevicePtr src = items.ptr();
+                                if (mth == 2 || mth == 3) {
+                                    std::memcpy(pin.data(), host.data(), n * fpi * sizeof(float));
+                                    src = static_cast<DevicePtr>(reinterpret_cast<std::uintptr_t>(pinDev));
+                                } else {
+                                    items.upload(host.data(), n * fpi * sizeof(float));
+                                }
+                                core.checkDevice(DeviceItems{src, n, 0}, DeviceSpan<std::uint32_t>{counts.ptr(), n});
+                                const std::uint32_t* c = nullptr;
+                                if (mth == 1 || mth == 2) {
+                                    counts.download(dl.data(), n * sizeof(std::uint32_t));
+                                    c = dl.data();
+                                } else {
+                                    counts.downloadAsync(pinCounts.data(), n * sizeof(std::uint32_t), s0);
+                                    cudaStreamSynchronize(s0);
+                                    c = static_cast<const std::uint32_t*>(pinCounts.data());
+                                }
+                                for (std::size_t k = 0; k < n; ++k) f[k] = c[k] > 0;
+                            }
+                            const auto t1 = std::chrono::steady_clock::now();
+                            if (j == 0) ref = f;
+                            else if (f != ref) ++mism;
+                            if (r >= o.warmup) t[mth].push_back(std::chrono::duration<double, std::micro>(t1 - t0).count());
+                        }
+                    }
+                    std::printf("\n-- host-path emulation %s N=%zu (flag mismatches %zu): median [p10, p90] us\n", m.c_str(), n, mism);
+                    for (int k = 0; k < M; ++k) {
+                        std::printf("   %-70s %8.2f [%8.2f, %8.2f]\n", names[k], pct(t[k], 0.5), pct(t[k], 0.1), pct(t[k], 0.9));
+                    }
+                    std::fflush(stdout);
+                }
+                continue;
+            }
 
             PhaseTrace trace;
             trace.probeIdleSync = o.probeSync;
