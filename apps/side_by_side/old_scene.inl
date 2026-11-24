@@ -1,7 +1,7 @@
-// OLD-STACK TU (deleted with the old stack): the compile-time scene of this executable, selected like the old
-// benchmarks with SHELF / SHELFSIMPLE / DENSESHELF. The scene headers define non-inline functions, so they are
-// included in this TU only.
-#include "old_runner.h"
+// Included by old_profiles.cpp only (deleted with the old stack): the compile-time scene, selected like the old
+// benchmarks with SHELF / SHELFSIMPLE / DENSESHELF. The old headers define non-inline functions (meshModel,
+// obstacle, scene, tinyobjloader), so the whole old stack must live in ONE translation unit per binary; hence
+// one rtcd_sbs_old_<scene> library per scene.
 
 #if defined(DENSESHELF)
 #include <CollisionScenes/Scene/denseShelf.h>

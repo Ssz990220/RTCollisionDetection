@@ -1,5 +1,5 @@
-// OLD-STACK TU of the side-by-side runner (deleted with the old stack). The only translation unit that includes
-// the old detector. Every profile is a verbatim copy of an old setup:
+// OLD-STACK TU of the side-by-side runner (deleted with the old stack). The only translation unit of a binary
+// that includes old-stack headers (they are not ODR-safe across TUs); compiled once per scene. Every profile is a verbatim copy of an old setup:
 //   reg_*        RTCD/CollisionDetector/Test/ccRegression.cpp (NSTREAM 4, REG_BATCHSIZE 128)
 //   bm_ias/ray   RTCD/Benchmark/Discrete (NSTREAM 4, batch 1024)
 //   bm_linear_*, bm_quad_*, bm_curve_mesh/ray   RTCD/Benchmark/Curve (NSTREAM 16; curves batch 16)
@@ -18,8 +18,8 @@
 
 using namespace RTCD;
 
-// old_scene.cpp: buildSharedScene of the scene header compiled into this executable.
-std::shared_ptr<RTCD::scene> rtcdSbsBuildOldScene(bool loop);
+// The scene of this library (SHELF / SHELFSIMPLE / DENSESHELF): rtcdSbsBuildOldScene, oldSceneName.
+#include "old_scene.inl"
 
 namespace rtcd::sbs {
 
