@@ -30,7 +30,7 @@ App options: `--scene <scene.json | shelf | shelf_simple | shelf_dense>` (defaul
 `RTCD_BM_REFIT_EVERY` are the old benchmarks' knobs (`tests/support/options.h`).
 
 The scripts in the repository root run both apps over the three scenes and write the JSON where the plotting
-scripts read it:
+tool (`scripts/Benchmark/plots/plot_benchmarks.py`, see [below](#plotting-benchmark-results)) reads it:
 ```bash
 ./benchmark.sh  [--only discrete|curve] [--build <dir>] [--out <dir>] [-- <Google Benchmark args>]   # Linux
 ```

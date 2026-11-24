@@ -238,22 +238,32 @@ def fmt_factor(v, _=None):
     return ("%.3g" % v) + "×"
 
 
-def speedup_axis(ax, ratios, ref_label):
-    """log y axis around 1 with 'faster' / 'slower' regions shaded and named."""
-    from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
+def speedup_row(axes, ratios, ref_label):
+    """Format a row of speedup panels: one shared log y range around 1 (so the scenes compare at a glance),
+    'faster' / 'slower' bands, and the band names once, in the right margin of the last panel."""
+    from matplotlib.transforms import blended_transform_factory
 
     finite = [r for r in ratios if r and r > 0 and math.isfinite(r)]
     lo = min(finite + [0.8]) / 1.5
     hi = max(finite + [1.25]) * 1.5
+    for ax in axes:
+        speedup_axis(ax, lo, hi)
+    ax = axes[-1]
+    tr = blended_transform_factory(ax.transAxes, ax.transData)
+    for y0, y1, word in ((1, hi, "faster"), (lo, 1, "slower")):
+        ax.text(1.03, math.sqrt(y0 * y1), "%s than\n%s" % (word, ref_label), transform=tr, rotation=90,
+                ha="left", va="center", ma="center", fontsize=8, color=MUTED, clip_on=False)
+
+
+def speedup_axis(ax, lo, hi):
+    """log y axis from lo to hi around 1 with the 'faster' (above 1) / 'slower' regions shaded."""
+    from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
+
     ax.set_yscale("log")
     ax.set_ylim(lo, hi)
     ax.axhspan(1, hi, color="#0072B2", alpha=0.06, lw=0, zorder=0)
     ax.axhspan(lo, 1, color="#D55E00", alpha=0.06, lw=0, zorder=0)
     ax.axhline(1, color=MUTED, lw=1.0, zorder=1)
-    ax.text(0.02, 0.97, "faster than %s" % ref_label, transform=ax.transAxes, va="top", ha="left", fontsize=8,
-            color=MUTED, bbox=dict(fc="white", ec="none", alpha=0.7, pad=1))
-    ax.text(0.02, 0.03, "slower than %s" % ref_label, transform=ax.transAxes, va="bottom", ha="left",
-            fontsize=8, color=MUTED, bbox=dict(fc="white", ec="none", alpha=0.7, pad=1))
     decades = math.log10(hi / lo)
     if decades < 0.8:  # a narrow range: explicit factors so more than the 1x tick shows
         from matplotlib.ticker import FixedLocator
@@ -283,8 +293,12 @@ def save(fig, base, formats, dpi, log=print):
     log("  wrote %s.{%s}" % (short_path(base), ",".join(formats)))
 
 
+SHOW_HOST = False  # --show-host: name the benchmark machine (JSON context host_name) in subtitles
+
+
 def context_line(sets, extra=None):
-    """'NVIDIA GeForce RTX 5080 · stack new · 2026-11-23' from the JSON context of the result sets."""
+    """'NVIDIA GeForce RTX 5080 · new stack · 2026-11-23' from the JSON context of the result sets. The host name
+    is left out unless --show-host (it names a machine, not the hardware)."""
     parts = []
     ctx = sets[0].context if sets else {}
 
@@ -292,8 +306,9 @@ def context_line(sets, extra=None):
         vals = {r.context.get(key) for r in sets}
         return ctx.get(key) if len(vals) == 1 else None
 
-    dev = same("rtcd_device")
-    parts.append(dev if dev else ("host %s" % same("host_name") if same("host_name") else None))
+    parts.append(same("rtcd_device"))
+    if SHOW_HOST and same("host_name"):
+        parts.append("host %s" % same("host_name"))
     if same("rtcd_stack"):
         parts.append("%s stack" % same("rtcd_stack"))
     if same("rtcd_robot"):
@@ -454,7 +469,7 @@ def overview_figure(plt, sets, args, kind):
         fig, axes = new_figure(plt, 2, ncols, (3.6 * ncols + 0.6, 6.6), sharex="col",
                                gridspec_kw=dict(height_ratios=[1.45, 1]))
     noun = br.ITEM_NOUN[kind]
-    all_t = []
+    all_t, row_ratios, ref_axes = [], [], []
     for j, rs in enumerate(sets):
         series, labels = select_series(rs, args.all_series, args.methods)
         ax = axes[0][j]
@@ -482,7 +497,7 @@ def overview_figure(plt, sets, args, kind):
             ax.set_ylabel("Time per %s [µs]" % noun)
         # speedup row
         refs = refs_by_set[j]
-        ratios = []
+        ref_axes += [axs] if refs else []
         if refs:
             for s in series:
                 if any(s is r for r in refs):
@@ -498,8 +513,7 @@ def overview_figure(plt, sets, args, kind):
                 std = [p[1] * p[2] if p[2] is not None else None for p in pts]
                 draw_series(axs, xs, ys, std if any(v is not None for v in std) else None,
                             series_style(kind, s, series), labels[s.key])
-                ratios += ys
-            speedup_axis(axs, ratios, ref_name)
+                row_ratios += ys
         else:
             axs.text(0.5, 0.5, "no %s results\nfor this scene" % ref_name, transform=axs.transAxes,
                      ha="center", va="center", color=MUTED)
@@ -507,6 +521,8 @@ def overview_figure(plt, sets, args, kind):
         if j == 0:
             axs.set_ylabel("Speedup over %s" % ref_name)
         set_batch_axis(axs, ns, "%s per batch" % br.ITEM_PLURAL[kind].capitalize())
+    if ref_axes:  # one y range for the speedup row too
+        speedup_row(ref_axes, row_ratios, ref_name)
     # one y range for the time row, so the scenes can be compared
     if all_t:
         lo, hi = min(all_t), max(all_t)
@@ -773,12 +789,12 @@ def compare_speedup_figure(plt, runs, groups, kind, args, ref_label, log):
     nrows, ncols = len(runs) - 1, len(groups)
     fig, axes = new_figure(plt, nrows, ncols, (3.6 * ncols + 0.9, 2.9 * nrows + 1.6), sharex="col")
     log("  speedup of each run over '%s' (t_%s / t_run; > 1 = faster):" % (ref_label, ref_label))
+    all_ratios = []
     for j, (title, sets, keep, present) in enumerate(groups):
         ns = sorted({n for d in present for lab in keep for n in (d[lab].points if lab in d else [])})
         for i in range(nrows):
             r = i + 1
             ax = axes[i][j]
-            ratios = []
             for lab in keep:
                 if lab not in present[r]:
                     continue
@@ -789,15 +805,16 @@ def compare_speedup_figure(plt, runs, groups, kind, args, ref_label, log):
                 xs, ys = [p[0] for p in pts], [p[1] for p in pts]
                 std = [p[1] * p[2] if p[2] is not None else None for p in pts]
                 draw_series(ax, xs, ys, std if any(v is not None for v in std) else None, series_style(kind, s, list(present[r].values())), lab)
-                ratios += ys
+                all_ratios += ys
                 log("    %-14s %-26s %s" % (title, "%s, %s" % (runs[r][0], lab) if nrows > 1 else lab,
                                             "  ".join("%d:%.2f" % (n, v) for n, v in zip(xs, ys))))
-            speedup_axis(ax, ratios, "reference")
             if i == 0:
                 ax.set_title(title)
             if j == 0:
                 ax.set_ylabel("Speedup of %s" % runs[r][0], fontsize=9)
             set_batch_axis(ax, ns, ("%s per batch" % br.ITEM_PLURAL[kind].capitalize()) if i == nrows - 1 else None)
+    for row in axes:  # one y range for every panel: scenes and runs compare at a glance
+        speedup_row(list(row), all_ratios, "reference")
     finish_figure(fig, [a for row in axes for a in row],
                   "Speedup over “%s”, %s checks: t(%s) / t(run) at each batch size" % (
                       ref_label, kind, ref_label), runs_subtitle(runs, groups))
@@ -844,6 +861,8 @@ def add_common(p):
                    help="also plot series the Julia figures left out (curve BM_MESH / BM_RAY halves of Two-way, "
                         "cuRobo with 4 sweep steps)")
     p.add_argument("--note", help="text appended to the figure subtitles, e.g. 'RTX 4070, Linux, original code'")
+    p.add_argument("--show-host", action="store_true",
+                   help="also name the benchmark machine (host_name of the JSON context) in the subtitles")
 
 
 def build_parser():
@@ -906,6 +925,8 @@ def main(argv=None):
         argv = ["figures"] + argv
     args = build_parser().parse_args(argv)
     args.formats = [x.strip().lower() for x in args.formats.split(",") if x.strip()]
+    global SHOW_HOST
+    SHOW_HOST = args.show_host
     if args.command == "compare":
         return cmd_compare(args)
     args.figures = {x.strip() for x in args.figures.split(",")}
