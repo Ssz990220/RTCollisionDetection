@@ -5,12 +5,14 @@
 //   RTCD_OPTIX_CFG="key=value,key=value"   applied to OptixCompileConfig::buildDefault(), keys see
 //                                          OptixCompileConfig::setField (opt, debug, maxreg, exceptions, tracedepth,
 //                                          rayhit, pipelinelog, validation, loglevel)
-//   RTCD_CURVE_GEOM_FLAG=none|single_anyhit curve build-input geometry flag (batchOptixCurveRobot::setGeometryFlags)
+//   RTCD_CURVE_GEOM_FLAG=none|single_anyhit curve build-input geometry flag (batchOptixCurveRobot::setGeometryFlags);
+//                                          unset = library default (single_anyhit for QUAD, none otherwise)
 #include <CollisionDetector/OptixCompileConfig.h>
 #include <optix_types.h>
 
 #include <cstdio>
 #include <cstdlib>
+#include <optional>
 #include <string>
 
 namespace RTCD {
@@ -26,18 +28,21 @@ namespace RTCD {
         return cfg;
     }
 
-    // Returns the curve geometry flag requested by RTCD_CURVE_GEOM_FLAG (OPTIX_GEOMETRY_FLAG_NONE if unset).
-    inline unsigned int benchmarkCurveGeometryFlags() {
-        unsigned int flags = OPTIX_GEOMETRY_FLAG_NONE;
-        if (const char* v = std::getenv("RTCD_CURVE_GEOM_FLAG")) {
-            const std::string s(v);
-            if (s == "single_anyhit") {
-                flags = OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL;
-            } else if (s != "none") {
-                std::fprintf(stderr, "RTCD_CURVE_GEOM_FLAG: unknown value \"%s\"\n", v);
-                std::exit(1);
-            }
+    // Returns the curve geometry flag requested by RTCD_CURVE_GEOM_FLAG, or nullopt if the variable is unset
+    // (= keep the library default, see curveDefaultGeometryFlags in Robot/batchCurveRobot.h).
+    inline std::optional<unsigned int> benchmarkCurveGeometryFlags() {
+        const char* v = std::getenv("RTCD_CURVE_GEOM_FLAG");
+        if (!v) {
+            return std::nullopt;
         }
-        return flags;
+        const std::string s(v);
+        if (s == "single_anyhit") {
+            return OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL;
+        }
+        if (s != "none") {
+            std::fprintf(stderr, "RTCD_CURVE_GEOM_FLAG: unknown value \"%s\"\n", v);
+            std::exit(1);
+        }
+        return OPTIX_GEOMETRY_FLAG_NONE;
     }
 } // namespace RTCD

@@ -131,17 +131,26 @@ namespace {
 // Arguments (any order):
 //   --write-golden                record the golden instead of comparing
 //   --optix key=value[,key=value]  OptiX compile settings, keys see OptixCompileConfig::setField
-//   --curve-single-anyhit         curve build input with OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL
+//   --curve-geom-flag none|single_anyhit
+//                                 curve build-input geometry flag (default: library default, i.e. single_anyhit
+//                                 for QUAD, none for LINEAR; see curveDefaultGeometryFlags)
+//   --curve-single-anyhit         same as --curve-geom-flag single_anyhit
 int main(int argc, char** argv) {
     bool writeGolden        = false;
-    bool curveSingleAnyHit  = false;
+    std::string curveGeomFlag; // empty = library default
     OptixCompileConfig ocfg = OptixCompileConfig::buildDefault();
     for (int i = 1; i < argc; i++) {
         const std::string a(argv[i]);
         if (a == "--write-golden") {
             writeGolden = true;
         } else if (a == "--curve-single-anyhit") {
-            curveSingleAnyHit = true;
+            curveGeomFlag = "single_anyhit";
+        } else if (a == "--curve-geom-flag" && i + 1 < argc) {
+            curveGeomFlag = argv[++i];
+            if (curveGeomFlag != "none" && curveGeomFlag != "single_anyhit") {
+                std::cout << "invalid --curve-geom-flag value: " << curveGeomFlag << std::endl;
+                return 2;
+            }
         } else if (a == "--optix" && i + 1 < argc) {
             if (!ocfg.setFields(argv[++i])) {
                 std::cout << "invalid --optix value: " << argv[i] << std::endl;
@@ -153,7 +162,7 @@ int main(int argc, char** argv) {
         }
     }
     std::cout << "[" << MODE << "] optix cfg: " << ocfg.describe()
-              << (curveSingleAnyHit ? " curve-single-anyhit" : "") << std::endl;
+              << " curve-geom-flag=" << (curveGeomFlag.empty() ? "default" : curveGeomFlag) << std::endl;
 
     auto [cudaContext, optixContext, streams] = createContextStream<NSTREAM>(ocfg);
     auto r                                    = std::make_shared<robot<Dim>>(Config);
@@ -167,13 +176,14 @@ int main(int argc, char** argv) {
 #else
     auto robotImpl = std::make_shared<batchOptixCurveRobot<CFG>>(r, streams, optixContext);
     auto ccRobot   = std::make_shared<CCWrappedRobot<NSTREAM, TYPE>>(robotImpl);
-    if (curveSingleAnyHit) {
-        robotImpl->setGeometryFlags(OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL);
+    if (!curveGeomFlag.empty()) {
+        robotImpl->setGeometryFlags(curveGeomFlag == "none" ? OPTIX_GEOMETRY_FLAG_NONE
+                                                            : OPTIX_GEOMETRY_FLAG_REQUIRE_SINGLE_ANYHIT_CALL);
     }
 #endif
     if constexpr (!CURVE) {
-        if (curveSingleAnyHit) {
-            std::cout << "--curve-single-anyhit only applies to curve modes" << std::endl;
+        if (!curveGeomFlag.empty()) {
+            std::cout << "--curve-geom-flag / --curve-single-anyhit only apply to curve modes" << std::endl;
             return 2;
         }
     }
