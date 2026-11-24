@@ -1,6 +1,16 @@
-# RTCD new stack: interface design (Stage 0-B)
+# RTCD new stack: interface design (Stage 0-B, amended in Stage 0-C)
 
-Status: proposed contract, to be frozen once approved. Base commit: `22d86d1` (branch `optix9-upgrade`).
+> **FROZEN as of the Stage 0-C commit on branch `optix9-upgrade`** (the commit that adds this note; Stage 0-C
+> was based on `c46667d`). From here on the contract -- every header under `include/rtcd/` (public and
+> `internal/`) and this document -- is changed only by main. **Change procedure:** a module agent that needs a
+> header change does not make it; it sends main a request naming the file, the exact declaration (old and new
+> text) and the reason. Main decides, applies the change in one commit to the contract, updates this document in
+> the same commit, and tells every affected agent. Implementation files, private headers under `src/<module>/`
+> and tests stay with their owners (section 8).
+
+Status: frozen contract. Stage 0-B base commit: `22d86d1`; Stage 0-C amendments: curve geometry-flag default
+"auto" (sections 3.7, 7.1), one library / directory list with five Wave-1 agents (sections 2, 8), geometry I/O
+seam declarations (`rtcd/geometry.h`, section 3.6), compile-only CMake targets (section 9).
 Headers: `include/rtcd/`. Everything here implements section 3 of the restructuring brief (side-by-side stack,
 seams only at rare calls, three kinds of parameters, JSON outside the core, runtime robot, one backend interface,
 `CollisionChecker` facade, Level-2 optimizations kept).
@@ -27,7 +37,7 @@ Contents
   parity tests need). Module-to-module contracts that are not user API are in `rtcd::internal`
   (`include/rtcd/internal/`).
 - Public headers are plain C++20, include no CUDA or OptiX header, and compile with `/permissive- /W4 /WX`
-  (verified, section 9). CUDA / OptiX handles are aliases of the same opaque tags (`rtcd::StreamHandle` *is*
+  (enforced by CMake targets in `AllNew`, section 9). CUDA / OptiX handles are aliases of the same opaque tags (`rtcd::StreamHandle` *is*
   `cudaStream_t`, `rtcd::DevicePtr` *is* `CUdeviceptr`, `rtcd::TraversableHandle` *is* `OptixTraversableHandle`,
   `rtcd::OptixContextHandle` *is* `OptixDeviceContext`), so no casts are needed in implementation files.
   Mirrored OptiX enums (`BuildFlagBits`, `GeometryFlagBits`, `PrimitiveTypeBits`, `TraversableGraph`, exception
@@ -41,37 +51,49 @@ Contents
 
 ## 2. Modules, libraries, dependency graph
 
+Header includes (rtcd headers only; a header only includes headers listed above it):
+
 ```
-                         limits.h
-                            |
-                         types.h ------------------------------+
-                         /   |   \                              |
-                 errors.h  geometry.h  (Logger)                 |
-                     |       |    \                             |
-           device_buffer.h   |    config.h                      |
-                     |       |       |                          |
-                 context.h   |       |                          |
-                  /     \    |       |                          |
-   internal/accel.h   scene.h   robot_model.h                   |
-   internal/algorithms.h  \      /        \                     |
-   internal/kinematics.h   backend.h       json_config.h -------+
-                              |
-                          checker.h          internal/reference_executor.h (uses backend.h)
+limits.h
+errors.h                        (none)
+types.h                         <- limits.h                                   (also Logger)
+geometry.h                      <- limits.h                                   (+ rtcd_geometry free functions)
+device_buffer.h                 <- types.h
+context.h                       <- types.h
+config.h                        <- geometry.h, types.h
+internal/algorithms.h           <- limits.h, types.h
+internal/accel.h                <- context.h, device_buffer.h, types.h
+internal/kinematics.h           <- device_buffer.h, limits.h, types.h
+scene.h                         <- context.h, geometry.h, limits.h, types.h
+robot_model.h                   <- geometry.h, limits.h, types.h              (host only, no Context)
+backend.h                       <- config.h, context.h, limits.h, robot_model.h, scene.h, types.h
+checker.h                       <- config.h, context.h, robot_model.h, scene.h, types.h
+json_config.h                   <- config.h, robot_model.h, scene.h
+internal/reference_executor.h   <- backend.h, config.h, context.h
+rtcd.h                          umbrella of the public (non-internal) headers
 ```
 
-Libraries (CMake targets are Stage 0-A's; names proposed):
+Libraries (CMake targets as merged in Stage 0-C; `src/CMakeLists.txt` repeats this list):
 
-| library            | implements                                                              | links            | wave |
-|--------------------|-------------------------------------------------------------------------|------------------|------|
-| `rtcd_core`        | errors.h, types.h (Logger), device_buffer.h, context.h, internal/algorithms.h, internal/accel.h | CUDA, OptiX, CUB | 1a |
-| `rtcd_config`      | config.h (`validate`, `resolved`)                                        | --               | 1b |
-| `rtcd_json`        | json_config.h                                                            | rtcd_config, nlohmann-json | 1b |
-| `rtcd_geometry`    | robot_model.h, scene.h, internal/kinematics.h, mesh / sphere / OBB I/O   | rtcd_core, urdfdom, tinyobjloader, Eigen | 1c |
-| `rtcd_testsupport` | internal/reference_executor.h, input / golden utilities (tests/support)  | rtcd_core, rtcd_geometry | 1d |
-| `rtcd_detector`    | checker.h (pipeline, SBT, batch loop, dispatch)                          | rtcd_core, rtcd_config, backends | 2e |
-| `rtcd_backend_mesh`| `createMeshBackend` + its OptiX programs                                 | rtcd_core, rtcd_geometry | 2f |
-| `rtcd_backend_ray` | `createRayBackend` + its OptiX programs                                  | rtcd_core, rtcd_geometry | 2g |
-| `rtcd_backend_curve`| `createCurveBackend` + its OptiX programs and curve kernels             | rtcd_core, rtcd_geometry | 2h |
+| library | directory | implements | links (PUBLIC unless noted) | wave / agent |
+|---|---|---|---|---|
+| `rtcd_core` | `src/core` | errors.h, types.h (Logger), device_buffer.h, context.h, internal/algorithms.h, internal/accel.h | CUDA runtime + driver, OptiX (CUB from the toolkit) | 1a |
+| `rtcd_config` | `src/config` | config.h (`validate`, `resolved`) | -- (no dependencies) | 1b |
+| `rtcd_json` | `src/json` | json_config.h | rtcd_config; nlohmann-json (private) | 1b |
+| `rtcd_geometry` | `src/geometry` | geometry.h free functions: `loadObjMesh` (reproducing the old `loadOBJ`), `computeEdges` (unique / loop edges), `fitObb`, `loadSpheres` | rtcd_core; tinyobjloader, Eigen (private) | 1c |
+| `rtcd_scene` | `src/scene` | scene.h (`Scene`: obstacle GASes + IAS, both edge sets, obstacle OBBs) | rtcd_geometry | 1c |
+| `rtcd_robot` | `src/robot` | robot_model.h (URDF -> chain -> kinematics table, link geometry via rtcd_geometry), internal/kinematics.h (kernels) | rtcd_geometry; urdfdom, Eigen (private) | 1d |
+| `rtcd_testsupport` | `tests/support` | internal/reference_executor.h, cached inputs / goldens utilities | rtcd_core, rtcd_config, rtcd_robot, rtcd_scene | 1e |
+| `rtcd_detector` | `src/detector` | checker.h (pipeline, SBT, batch loop, dispatch) | rtcd_config, rtcd_robot, rtcd_scene; the three backends (private) | 2e |
+| `rtcd_backend_mesh` | `src/backend_mesh` | `createMeshBackend` + its embedded OptiX programs | rtcd_robot, rtcd_scene, rtcd_config | 2f |
+| `rtcd_backend_ray` | `src/backend_ray` | `createRayBackend` + its embedded OptiX programs | rtcd_robot, rtcd_scene, rtcd_config | 2g |
+| `rtcd_backend_curve` | `src/backend_curve` | `createCurveBackend` + its embedded OptiX programs and curve kernels | rtcd_robot, rtcd_scene, rtcd_config | 2h |
+
+Umbrella INTERFACE target `rtcd` = rtcd_detector + the three backends + rtcd_config + rtcd_json (what apps and
+tests link). There is no shared programs library: each backend compiles its own program `.cu` to OptiX IR and
+embeds it with `rtcd_add_optix_ir(rtcd_backend_<x>_ir SOURCES ...)` (`cmake/RTCDTargets.cmake`, linked PRIVATE),
+returning the bytes in `ProgramSet::moduleCode`. `rtcd_testsupport` is configured from the top-level
+`CMakeLists.txt` (apps use it too), even with `BUILD_TESTS=OFF`.
 
 No library depends on JSON except `rtcd_json`. Every compile-time-constant kernel parameter (curve degree, the
 reduction width of the control-point kernel) is a template explicitly instantiated inside its `.cu`.
@@ -142,7 +164,13 @@ Threading: all methods thread-safe. Errors: `CudaError` / `OptixError` from `cre
 Purpose: host geometry values. `TriangleMesh` documents exactly what the loader must reproduce from the old
 `meshModel::loadOBJ` (vertex dedup order, triangle order, unique-edge order and direction, loop edges), because the
 ray sets and OBBs feed the goldens. `Transform::fromXyzRpy` uses the URDF convention `Rz(y) Ry(p) Rx(r)`.
-Ownership: values. Threading: values. Errors: none.
+Free functions of `rtcd_geometry` (added in Stage 0-C as the seam to `rtcd_scene` and `rtcd_robot`):
+`loadObjMesh(file, pose = identity, scale = 1)` (dedup on the positions as read, then `pose * (scale * v)` with the
+old float results), `computeEdges(TriangleMesh&)` (unique + loop edges + watertight from the triangles; used again
+by `rtcd_robot` after merging fixed links), `fitObb(span<const Vec3>)` (= `computeBestFittingOBB`),
+`loadSpheres(file, format = "xyzr")` (the "xyzr" rules of 3.9).
+Ownership: values; functions are reentrant, host only. Errors: `IoError`, `InvalidArgument`, `UnsupportedError`
+(non-"xyzr" sphere format), as documented per function.
 
 ### 3.7 `config.h` -- `CheckerConfig`
 
@@ -151,7 +179,8 @@ Purpose: all checker options as plain data, each field documented with default, 
 `release()/debug()/profile()/buildDefault()`), `MeshOptions` (link GAS build, `compactionMinPoses = 128`,
 `parkTransform` = old safeTransform), `RayOptions` (`launchWidthCap = 262144`, `skipHitItems = true`, `hitMode`),
 `CurveOptions` (trajectory / control points, end points, GAS build, `RefitPolicy`, `autoRefitMaxBatches`
-(-1 = 2 for linear, 1 otherwise), geometry flags, spline weights dir). Top level: mode, `numStreams = 4`,
+(-1 = 2 for linear, 1 otherwise), `geometryFlags` (`std::optional`, nullopt = "auto" = single any-hit for
+quadratic, none for linear and cubic, as the old `curveDefaultGeometryFlags` since `4ee064e`), spline weights dir). Top level: mode, `numStreams = 4`,
 `hostDispatch = ThreadPerStream`, `maxBatchSize = 1024`, `maxItemsPerCheck = 8192`, `obbCulling = Auto`
 (On for Mesh / Ray, Off for curves), `collapseRootLinkObb = true` (old `SKIP_BASE`), `sceneEdges = auto`
 (Unique for Mesh, Loop for curves), verbosity.
@@ -163,9 +192,11 @@ Purpose: all checker options as plain data, each field documented with default, 
 - curves: `2 <= trajectoryPoints <= kMaxTrajectoryPoints`; for degree 2/3: `degree < controlPoints < trajectoryPoints`
   and `controlPoints * trajectoryPoints <= kMaxSplineWeights`; `splineWeightsDir` non-empty for degree 2/3;
   `refit.kind == Every` needs `every >= 2`; `obbCulling == On` with `CubicCurve` is rejected (unsupported, as in
-  the old stack); geometry flags only None or RequireSingleAnyHitCall.
+  the old stack); `curve.geometryFlags` only nullopt (auto), None or RequireSingleAnyHitCall.
 - `sceneEdges` is ignored by Ray (no error).
-`resolved()` replaces Auto values; with OBB culling on, the effective curve refit policy is Never and
+`resolved()` replaces Auto values; `curve.geometryFlags` always holds a value afterwards (RequireSingleAnyHitCall
+for `QuadraticCurve`, None for `LinearCurve`, `CubicCurve` and the non-curve modes; an explicit value is kept);
+with OBB culling on, the effective curve refit policy is Never and
 `ALLOW_UPDATE` is not set (old `curveUseRefit = !useOBB`). Construction-time checks against robot / scene / files
 are in the checker (and backends): Ray `maxBatchSize * raysPerRobot < 2^30`, spline weight file exists and holds
 exactly `controlPoints' * trajectoryPoints` floats, curves need `RobotModel::hasSpheres()`, `robot.dof() <= kMaxDof`.
@@ -189,6 +220,7 @@ overrides, visual vs collision element), optional sphere source (dir, format "xy
 `KinematicsTable`, per-link `LinkGeometry` (mesh, spheres, OBB, files), flat sphere arrays (old
 `sphereCentersTemplate / sphereRadiusTemplate / sphereIdxToLinkIdx` order), host reference FK.
 
+Library `rtcd_robot` (Wave 1 d); link meshes, spheres and OBBs through the `rtcd_geometry` functions of 3.6.
 Loading rules (full text in the header): revolute + continuous actuated, fixed folded / merged, prismatic /
 floating / planar rejected; serial chain after merging; table derived as `T_j(q) = A_j Rot(k_j, q)` split into
 cos / sin / one masks in double, entries `|v| < 1e-9` snapped to 0, rounded to float -- must equal
@@ -261,10 +293,10 @@ Ownership: functions, values. Threading: reentrant. Errors: `IoError`, `ConfigEr
   device count, = old `cub::DeviceSelect::FlaggedIf` use), scratch-size functions. No allocation, no sync.
 - `accel.h` (core, 1a): construction-time `buildTriangleGas` (with compaction, = old `meshModel::buildGAS`) and
   `buildInstanceAs`; synchronous.
-- `kinematics.h` (geometry, 1c): `uploadKinematics`, `linkPoses` (= `batchFkineAdj`), `linkPosesAndObbs`
+- `kinematics.h` (robot, 1d): `uploadKinematics`, `linkPoses` (= `batchFkineAdj`), `linkPosesAndObbs`
   (= fused `batchFkineAdjOBB`), `transformObbs` (= `batchOBBTransform`), `trajectoryLinkPoses`
   (= `batchFkineTraj`); bit-identical outputs; take `KinematicsRef {host table, device table}`.
-- `reference_executor.h` (test support, 1d): `ReferenceExecutor` (pipeline + SBT from a `ProgramSet`, launches a
+- `reference_executor.h` (test support, 1e): `ReferenceExecutor` (pipeline + SBT from a `ProgramSet`, launches a
   `LaunchPlan`) and `ReferenceBatchRunner` (single-threaded batch loop following `backend.h`), so the Wave 2 backend
   agents can test without the detector core and the core can be cross-checked.
 
@@ -374,7 +406,8 @@ sync, see open question Q5.
 | `OptixCompileConfig` opt / debug / maxreg / exceptions / tracedepth / pipelinelog | `OptixOptions` |
 | `OptixCompileConfig::contextValidation`, `contextLogLevel`                 | `ContextOptions::optixValidation`, `optixLogLevel` |
 | `OptixCompileConfig::setField(s)`, env `RTCD_OPTIX_CFG`                    | `applyOverrides` (json_config.h); apps read env vars |
-| env `RTCD_CURVE_GEOM_FLAG`, `batchOptixCurveRobot::setGeometryFlags`       | `CurveOptions::geometryFlags` (override `curve.geometry_flags=single_anyhit`) |
+| env `RTCD_CURVE_GEOM_FLAG`, `batchOptixCurveRobot::setGeometryFlags`       | `CurveOptions::geometryFlags` (override `curve.geometry_flags=none\|single_anyhit`) |
+| `curveDefaultGeometryFlags` (`batchCurveRobot.h`)                           | `resolved()` of `curve.geometry_flags: "auto"` (default) |
 | env `RTCD_BM_REFIT_EVERY`, `setRefitPolicy`, `REFIT_AUTO`, `refitMaxBatches` | `CurveOptions::refit`, `autoRefitMaxBatches` |
 | `setBatchCountHint`                                                        | `Backend::beginCheck(CheckInfo)` |
 | `curveUseRefit<CFG> = !useOBB`                                             | `resolved()`: OBB on -> refit Never, no ALLOW_UPDATE |
@@ -412,7 +445,7 @@ sync, see open question Q5.
 | `PRINTIT`                                                                  | `OptixOptions::printPipelineLog`, `ContextOptions::optixLogLevel`, Logger level |
 | `_DEBUG / DEBUG` (`buildDefault`)                                          | `OptixOptions::buildDefault()`, `ContextOptions::buildDefault()` (inline, per including TU) |
 | `PROJECT_BASE_DIR`, `CONCAT_PATHS` (`config.h.in`)                         | JSON paths resolved relative to the JSON file; nothing baked in |
-| `REG_IAS / REG_RAY / REG_LINEAR / REG_QUAD`, `REG_BATCHSIZE`, `REG_SINGLE_THREAD` | regression app arguments / JSON setups (harness, d) |
+| `REG_IAS / REG_RAY / REG_LINEAR / REG_QUAD`, `REG_BATCHSIZE`, `REG_SINGLE_THREAD` | regression app arguments / JSON setups (harness, 1e) |
 
 ## 7. JSON schemas and examples
 
@@ -450,7 +483,7 @@ the C++ structs; enums as strings; relative paths are relative to the file that 
 | `curve.gas_build` | as `mesh.link_gas_build` | `"fast_build"` |
 | `curve.refit` | `"auto" \| "always" \| "never" \| {"every": K}` | `"auto"` |
 | `curve.auto_refit_max_batches` | `"auto" \| int >= 0` | `"auto"` (linear 2, else 1) |
-| `curve.geometry_flags` | `"none" \| "single_anyhit"` | `"none"` |
+| `curve.geometry_flags` | `"auto" \| "none" \| "single_anyhit"` | `"auto"` (quadratic: single_anyhit; linear, cubic: none) |
 | `curve.spline_weights_dir` | path | none (required for quadratic / cubic) |
 
 Example (`configs/checker_quad.json`, the regression's QUAD setup):
@@ -481,12 +514,14 @@ Example (`configs/checker_quad.json`, the regression's QUAD setup):
     "gas_build": "fast_build",
     "refit": "auto",
     "auto_refit_max_batches": "auto",
-    "geometry_flags": "none",
+    "geometry_flags": "auto",
     "spline_weights_dir": "spline_weights"
   }
 }
 ```
 
+Here `"geometry_flags": "auto"` resolves to `single_anyhit` (quadratic), the old regression's default since
+`4ee064e`; the curve backend's gate (section 8, h) also runs `"none"` against the same golden.
 Other regression setups: IAS = `{"mode": "mesh", "max_batch_size": 128, "max_items_per_check": 4096}` (link GAS
 `fast_trace_compact`, OBB on); RAY = `{"mode": "ray", "max_batch_size": 128, "max_items_per_check": 4096}`; LINEAR =
 `{"mode": "linear_curve", "max_batch_size": 128, "max_items_per_check": 4096, "curve": {"trajectory_points": 16}}`.
@@ -558,33 +593,88 @@ Each value may also be the object itself (inline). Paths inside a referenced fil
 
 ## 8. Wave assignments
 
-The headers are frozen; each agent implements only the declarations listed, in its own `src/<module>/` (plus its
-tests under `tests/<module>/`). Cross-module needs go through the declared contracts only.
+The headers are frozen (change procedure at the top of this document); each agent implements only the
+declarations listed, in the directories it owns. Cross-module needs go through the declared contracts only.
+An owned directory includes its `CMakeLists.txt` (keep the target name, its PUBLIC links as in section 2, and
+`rtcd_register_new_target`; adding PRIVATE dependencies and sources is the owner's call). Main owns everything
+else: `include/rtcd/`, `docs/design/`, `cmake/`, the top-level `CMakeLists.txt`, `src/CMakeLists.txt`,
+`tests/CMakeLists.txt`, `apps/CMakeLists.txt`, `tests/interfaces_compile.cpp`, `tests/skeleton`.
 
 **Wave 1 (parallel)**
 
-- **(a) core** -- `errors.h` (throw helpers, sticky classification), `types.h` (`Logger::defaultSink`),
-  `device_buffer.h`, `context.h`, `internal/algorithms.h`, `internal/accel.h`; a static_assert TU tying the
-  mirrored enums / aliases to CUDA / OptiX (as `abi_check.cpp` of section 9). Tests: buffers, context, leases,
-  algorithms vs host references (compaction order, scan, OBB counts vs the old `BBCDRobotMask` on random OBBs).
-- **(b) config + JSON + scene description** -- `config.h` (`validate`, `resolved`), `json_config.h` (all functions),
-  `configs/` (checker per regression mode, scenes `shelf`, `shelf_dense`, `shelf_simple`, `debug_box` ported from
-  `RTCD/CollisionScenes/Scene/*.h`, `robots/panda.json`, setups, spline weights copy, see section 11). Tests:
-  defaults, every validation rule, unknown keys, path resolution, overrides, dump round trip. No GPU.
-- **(c) robot model + geometry** -- `robot_model.h` (`RobotModel::load`, URDF, merging, table derivation, sphere /
-  mesh I/O, OBB fit), `scene.h` (`Scene`), `internal/kinematics.h` (kernels), the mesh loader reproducing
-  `meshModel::loadOBJ`. Tests: Panda table == `pandas.h` masks bit for bit; FK kernels bit-identical to
-  `batchFkineAdj / batchFkineAdjOBB / batchOBBTransform / batchFkineTraj` on the cached poses; mesh edges, loop
-  edges and OBBs identical to the old loader for every Panda link and every shelf obstacle; Scene IAS sanity.
-  Depends on (a) for the GPU parts (`DeviceBuffer`, `buildTriangleGas`); host parts first.
-- **(d) test / benchmark harness** -- `tests/support/` (cached inputs from `data/motions` exactly as
-  `ccRegression.cpp` loads them, golden read / compare, flag diff printing), `internal/reference_executor.h`,
-  the new-stack regression app (same checks as `ccRegression.cpp`: determinism, prefix consistency with
-  N = 1, 37, B, B*S + 5, 1000, 4095, golden diff; driven by setup JSONs), benchmark apps equivalent to `BM_IAS`,
-  `BM_RAY`, `BM_CURVE_*` timing `checkDevice`, and a side-by-side runner that times old and new in the same
-  process for main's RUN REQUESTs. Depends on (a), (b), (c) declarations.
+Five agents, all running at the same time. Rules common to all of them:
 
-**Wave 2 (parallel, after Wave 1 is merged)**
+- Every cross-agent dependency is a function or type DECLARED in `include/rtcd/` (public or `internal/`). Nobody
+  includes another agent's private header (`src/<x>/...`) or relies on a symbol not declared there.
+- Each agent replaces the `placeholder.cpp` / `placeholder.cu` of its own libraries and deletes it with its first
+  real source. `tests/skeleton` (main's) keeps calling the placeholders until main deletes it at the Wave-1 merge;
+  keep a placeholder function until then if `test_skeleton_unit` would otherwise fail to link, or tell main.
+- Before another Wave-1 agent's implementation has landed, a test may link a clearly marked test-local stub or
+  fake of a declared function, inside the test's own `tests/<x>/` folder (never under `src/`), deleted at merge.
+  Code that needs the real thing is written now and integration-tested after the merge.
+- The old stack is the reference: tests may include old-stack headers and link old-stack targets read-only (the
+  namespaces `rtcd` and `RTCD` coexist). Nothing under `RTCD/` is edited.
+- New test folders are picked up automatically (`rtcd_add_new_test`, labels `new_unit` / `new_gpu`).
+
+- **(1a) core**
+  (i) Owns `src/core`, `tests/core`.
+  (ii) `errors.h`: `detail::throwCudaError / throwCuError / throwOptixError` (error names, sticky
+  classification); `types.h`: `Logger::defaultSink`; `device_buffer.h`: `DeviceBuffer`, `PinnedHostBuffer`;
+  `context.h`: `Context`, `ContextOptions`, `StreamLease`; `internal/algorithms.h`: `obbOverlapCounts`,
+  `exclusiveScanU32`, `flagsToBinaryU32`, `compactByFlags`, scratch-size functions; `internal/accel.h`:
+  `buildTriangleGas`, `buildInstanceAs`. Adopts `tests/core/abi_check.cpp` + `limits_device.cu` (already built
+  as `rtcd_core_abi_check`, section 9).
+  (iii) Depends on no other agent. Tests: buffers, context, leases, error classification, algorithms vs host
+  references (compaction order, scan, OBB counts vs the old `BBCDRobotMask` on random OBBs), GAS / IAS builds.
+- **(1b) config + JSON + configs/**
+  (i) Owns `src/config`, `src/json`, `tests/config`, `tests/json`, `configs/**`.
+  (ii) `config.h`: `CheckerConfig::validate`, `CheckerConfig::resolved` (including the `curve.geometryFlags`
+  "auto" rule, 3.7); `json_config.h`: every function. `configs/`: checker per regression mode, scenes `shelf`,
+  `shelf_dense`, `shelf_simple`, `debug_box` ported from `RTCD/CollisionScenes/Scene/*.h`, `robots/panda.json`,
+  setups, the spline-weights copy (section 11).
+  (iii) Needs no other agent: `rtcd_config` has no dependencies and `rtcd_json` only `rtcd_config`; the structs it
+  fills (`SceneDesc`, `RobotDesc`, `Transform`) and the exception classes are header-only. Tests: defaults, every
+  validation rule, `resolved()` per mode, unknown keys, path resolution, overrides, dump round trip. No GPU.
+- **(1c) geometry + scene**
+  (i) Owns `src/geometry`, `src/scene`, `tests/geometry`, `tests/scene`.
+  (ii) `geometry.h`: `loadObjMesh`, `computeEdges`, `fitObb`, `loadSpheres`; `scene.h`: `Scene` (all members).
+  (iii) Host parts need nobody: unique edges, loop edges and OBBs identical to the old loader (`RTCD/Meshes/mesh.h`,
+  `Obb.h`) for every Panda link mesh and every shelf obstacle; vertex positions identical to the old
+  `meshModel(path, transform, scale)`; sphere-file rules. `Scene` needs 1a (`Context`, `DeviceBuffer`,
+  `buildTriangleGas`, `buildInstanceAs`, the throw helpers): write it now, test it (IAS / edge-ray / OBB sanity
+  against the old `scene`) after 1a lands or against test-local stubs.
+- **(1d) robot model + kinematics**
+  (i) Owns `src/robot`, `tests/robot`.
+  (ii) `robot_model.h`: `RobotModel::load` and every `RobotModel` member (`linkPoses` included);
+  `internal/kinematics.h`: `uploadKinematics`, `linkPoses`, `linkPosesAndObbs`, `transformObbs`,
+  `trajectoryLinkPoses`.
+  (iii) Assumes from 1c only the four `geometry.h` functions (link meshes, merged-mesh edges, link OBBs, sphere
+  files) and from 1a `DeviceBuffer` (returned by `uploadKinematics`) and the throw helpers behind
+  `RTCD_CUDA_CHECK`. Tests before they land: the URDF -> chain -> `KinematicsTable` derivation for `panda.urdf`
+  equals the `pandas.h` masks bit for bit (keep the derivation callable without geometry, e.g. a private
+  function in `src/robot` used by `load`); the FK kernels are bit-identical to the old `batchFkineAdj /
+  batchFkineAdjOBB / batchOBBTransform / batchFkineTraj` on the cached poses (test buffers via plain
+  `cudaMalloc` + `DeviceSpan`, reference via the old stack). The link-geometry part of `RobotModel::load`
+  (meshes, spheres, OBBs, fixed-link merging) is integration-tested after the merge.
+- **(1e) test support + apps**
+  (i) Owns `tests/support` (library `rtcd_testsupport`), `tests/testsupport` (its tests),
+  `apps/**` (new folders, e.g. `apps/regression`, `apps/bench`; `apps/CMakeLists.txt` stays as is).
+  (ii) `internal/reference_executor.h`: `ReferenceExecutor`, `ReferenceBatchRunner`; utilities under
+  `tests/support` (headers included as `<support/...>`): cached inputs from `data/motions` exactly as
+  `ccRegression.cpp` loads them, golden read / compare, flag-diff printing; the new-stack regression app (same
+  checks as `ccRegression.cpp`: determinism, prefix consistency with N = 1, 37, B, B*S + 5, 1000, 4095, golden
+  diff; driven by setup JSONs); benchmark apps equivalent to `BM_IAS`, `BM_RAY`, `BM_CURVE_*` timing
+  `checkDevice`; a side-by-side runner that times old and new in the same process for main's RUN REQUESTs.
+  (iii) Uses everything, through declarations only: `Context` (1a), `loadSetup` and friends (1b), `Scene` (1c),
+  `RobotModel` (1d), `CollisionChecker` (Wave 2 e). Tests before they land: the input / golden utilities
+  against the old harness (byte-identical inputs, same golden decoding), host only; `ReferenceExecutor` with a
+  trivial test program (its own `rtcd_add_optix_ir` target) once 1a lands. Apps are written now; while a symbol
+  they call is not implemented yet (the `CollisionChecker` until Wave 2), build them compile-only (an OBJECT
+  library, as `rtcd_interfaces_compile`) and switch to `rtcd_add_app` when they link; they run after Wave 2.
+
+**Wave 2 (parallel, after Wave 1 is merged)** -- each agent owns its library directory and the test folder of
+the same name: (e) `src/detector` + `tests/detector`, (f) `src/backend_mesh` + `tests/backend_mesh`, (g)
+`src/backend_ray` + `tests/backend_ray`, (h) `src/backend_curve` + `tests/backend_curve`.
 
 - **(e) detector core** -- `checker.h` (`CollisionChecker`), pipeline / module / program-group / SBT building from
   `ProgramSet`, batch loop and dispatch, param-upload cache, stats. Tests with a fake backend plus the reference
@@ -599,23 +689,25 @@ Until (e) lands, (f)-(h) run their goldens through `ReferenceBatchRunner`; after
 
 ## 9. Compile check
 
-Done in this stage (MSVC 14.52 from `vcvars64.bat`, PATH quote fix as in the helper script; no CMake):
+Stage 0-B ran these by hand; since Stage 0-C they are CMake targets built by `AllNew` (compile only: OBJECT
+libraries, never linked or run), so every agent's build enforces them:
 
-1. Self-containment: one generated TU per header containing only `#include <that header>` twice (include guard),
-   18 TUs including `tests/interfaces_compile.cpp`, compiled with
-   `cl /nologo /std:c++20 /permissive- /W4 /WX /EHsc /Zs /I include` and NO CUDA / OptiX include path: all pass.
-2. `tests/interfaces_compile.cpp`: all headers together, an implemented `Backend`, constexpr helpers, aggregate
-   initialization, static_asserts on move-only / trivially-copyable properties: passes (same flags).
-3. ABI check (not committed; for Wave 1a to adopt): with the CUDA 13.2 and OptiX 9.1 include paths, static_asserts
-   that `StreamHandle == cudaStream_t == CUstream`, `CudaContextHandle == CUcontext`, `OptixContextHandle ==
-   OptixDeviceContext`, `DevicePtr == CUdeviceptr`, `TraversableHandle == OptixTraversableHandle`, and that every
-   mirrored flag value equals its OptiX enumerator, `sizeof(OptixInstance) == 80`: passes.
-4. Device check (not committed): `limits.h` included in a `.cu` compiled by `nvcc -std=c++17`, kernels reading
-   `KinematicsTable`, `Obb`, `EdgeRayParams`, `RobotRayParams`, plus static_asserts of the SBT constants against
-   `optix_types.h`: passes.
-
-Stage 0-A owns CMake; `tests/interfaces_compile.cpp` should be added as a compile-only object target
-(`add_library(rtcd_interfaces_compile OBJECT tests/interfaces_compile.cpp)` with only `include/` on the path).
+1. `rtcd_headers_selfcontained` (`tests/CMakeLists.txt`): one generated TU per header under `include/rtcd/`
+   (globbed at configure time, 17 headers) containing only `#include <that header>` twice (include guard).
+2. `rtcd_interfaces_compile` (`tests/interfaces_compile.cpp`): all headers together, an implemented `Backend`,
+   constexpr helpers, aggregate initialization, the `geometry.h` function signatures, the optional curve
+   geometry flags, static_asserts on move-only / trivially-copyable properties.
+   Both see ONLY `include/` (no CUDA, no OptiX, no library target linked) and compile with
+   `/W4 /WX /permissive-` (C++20). Verified in Stage 0-C that a CUDA include in a public header fails the build
+   (`C1083: Cannot open include file: 'cuda_runtime.h'`).
+3. `rtcd_core_abi_check` (`tests/core/abi_check.cpp`, owned by 1a): with rtcd_core's CUDA 13.2 / OptiX 9.1
+   include paths, static_asserts that `StreamHandle == cudaStream_t == CUstream`, `CudaContextHandle ==
+   CUcontext`, `OptixContextHandle == OptixDeviceContext`, `DevicePtr == CUdeviceptr`, `TraversableHandle ==
+   OptixTraversableHandle`, that every mirrored flag value equals its OptiX enumerator, `sizeof(OptixInstance) ==
+   80`.
+4. Same target, `tests/core/limits_device.cu` (nvcc): `limits.h` in device code, kernels reading
+   `KinematicsTable`, `Obb`, `EdgeRayParams`, `RobotRayParams`, static_asserts of the SBT constants against
+   `optix_types.h`.
 
 ## 10. Open questions
 
@@ -681,17 +773,16 @@ Each with the choice made in the headers and the recommendation.
   the old Release build did not make. Recommendation: keep (correctness), include in the first parity
   measurement.
 - **Q21 Snapping tolerance 1e-9** for the derived kinematics masks: chosen so that `cos(+-pi/2)` (about 5e-12 from
-  the URDF's 1.57079632679) becomes exactly 0 as in `pandas.h`. If any Panda entry still differs, (c) reports
+  the URDF's 1.57079632679) becomes exactly 0 as in `pandas.h`. If any Panda entry still differs, (1d) reports
   and the rule is adjusted, not the goldens.
 - **Q22 kMaxTrajectoryPoints = 512** derives from the control-point reduction (`powOf2(n) / 2 <= 256`); for linear
   curves no such limit exists. Recommendation: keep one limit for simplicity.
 
 ## 11. Requests outside this track's ownership
 
-- **Stage 0-A (CMake):** (1) a compile-only target for `tests/interfaces_compile.cpp` with only `include/` on the
-  include path (no CUDA), to keep the "plain C++20" property enforced; (2) a CMake helper to compile a backend's
-  OptiX program `.cu` to OptiX-IR and embed it as a byte array the backend returns in `ProgramSet::moduleCode`
-  (replaces `getInputData("CCCuda.cu")` / `PROJECT_PTX_DIR`); (3) library targets as in section 2.
+- **Stage 0-A (CMake):** done (Stage 0-A + 0-C): (1) compile-only targets, section 9; (2) `rtcd_add_optix_ir`
+  (`cmake/RTCDTargets.cmake`) compiles a backend's program `.cu` to OptiX IR and embeds it (replaces
+  `getInputData("CCCuda.cu")` / `PROJECT_PTX_DIR`); (3) library targets as in section 2.
 - **Wave 1 b (configs/):** copy `RTCD/data/weights/` to `configs/spline_weights/` (identical files) so the new stack
   does not reference the old tree.
 - **Old stack:** no change requested.

@@ -15,7 +15,8 @@
 // scale <= 0), CudaError / OptixError. edgeRays(EdgeSet::Loop) throws UnsupportedError naming the first
 // non-watertight obstacle if loop edges are not available.
 //
-// Implemented in src/geometry (Wave 1 c), reproducing RTCD/CollisionScenes/{obstacle.h, scene.h}.
+// Library rtcd_scene (src/scene, Wave 1 c), reproducing RTCD/CollisionScenes/{obstacle.h, scene.h}; meshes,
+// edges and OBBs through the rtcd_geometry functions declared in rtcd/geometry.h.
 
 #include <rtcd/context.h>
 #include <rtcd/geometry.h>

@@ -1,10 +1,11 @@
-// Compile check of the new stack's interface headers (Stage 0-B).
-// Verifies that every header under include/rtcd/ is self-contained and compiles as plain C++20 WITHOUT any CUDA
-// or OptiX include path. Compiles only (cl /c); nothing here is linked or run.
+// Compile check of the new stack's interface headers (Stage 0-B, wired into CMake in Stage 0-C).
+// Verifies that the headers under include/rtcd/ compile as plain C++20 WITHOUT any CUDA or OptiX include path.
+// Built by the OBJECT target rtcd_interfaces_compile (tests/CMakeLists.txt, part of AllNew) with only include/ on
+// the include path and /W4 /WX /permissive-; nothing here is linked or run.
 // This TU checks that all headers compile together and that the declarations are usable (an implementable
 // Backend, constexpr helpers, aggregate initialization). Self-containment of EACH header (compiles when included
-// first and alone) is checked separately with one generated TU per header; see docs/design/interfaces.md,
-// section "Compile check".
+// first and alone) is checked by the generated TUs of rtcd_headers_selfcontained (same file); see
+// docs/design/interfaces.md, section "Compile check".
 
 #include <rtcd/limits.h>
 #include <rtcd/types.h>
@@ -24,7 +25,11 @@
 #include <rtcd/internal/kinematics.h>
 #include <rtcd/internal/reference_executor.h>
 
+#include <filesystem>
+#include <span>
+#include <string_view>
 #include <type_traits>
+#include <vector>
 
 namespace {
 
@@ -77,7 +82,17 @@ namespace {
         cfg.curve.refit.kind       = rtcd::RefitPolicy::Kind::Every;
         cfg.curve.refit.every      = 4;
         cfg.sceneEdges             = rtcd::EdgeSet::Loop;
+        [[maybe_unused]] const bool autoGeometryFlags = !cfg.curve.geometryFlags.has_value(); // default "auto"
+        cfg.curve.geometryFlags    = rtcd::kGeometryFlagRequireSingleAnyHitCall;
         [[maybe_unused]] rtcd::ItemLayout layout = cfg.itemLayout(7);
+
+        // rtcd_geometry seam (declarations only; this TU is never linked).
+        [[maybe_unused]] rtcd::TriangleMesh (*loadMesh)(const std::filesystem::path&, const rtcd::Transform&, float) =
+            &rtcd::loadObjMesh;
+        [[maybe_unused]] void (*edges)(rtcd::TriangleMesh&)                            = &rtcd::computeEdges;
+        [[maybe_unused]] rtcd::Obb (*fit)(std::span<const rtcd::Vec3>)                   = &rtcd::fitObb;
+        [[maybe_unused]] std::vector<rtcd::Sphere> (*spheres)(const std::filesystem::path&, std::string_view) =
+            &rtcd::loadSpheres;
 
         rtcd::Transform t = rtcd::Transform::fromXyzRpy(0.45, 0, 0.4, 0, 0, 0) * rtcd::Transform::translation(0, 1, 0);
         [[maybe_unused]] rtcd::Vec3 p = t.apply({1, 2, 3});
