@@ -9,6 +9,7 @@
 //   * construction errors (wrong mode, missing / malformed spline weights, cubic + OBB).
 #include <rtcd/backend.h>
 #include <rtcd/context.h>
+#include <rtcd/device_buffer.h>
 #include <rtcd/errors.h>
 #include <rtcd/internal/reference_executor.h>
 #include <rtcd/json_config.h>
@@ -25,8 +26,11 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <algorithm>
+#include <exception>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 using namespace rtcd;
@@ -89,6 +93,66 @@ namespace {
         support::Flags run(const std::vector<float>& items, std::size_t n) {
             return support::flagsFromCounts(runner_->runAll(items, static_cast<std::uint32_t>(n)));
         }
+
+        // The batch loop of rtcd/backend.h with one host thread per stream (HostDispatch::ThreadPerStream, what the
+        // detector does by default): prepare() is called CONCURRENTLY for different stream indices.
+        support::Flags runThreaded(const std::vector<float>& items, std::size_t n) {
+            const std::size_t fpi = resolved_.itemLayout(env().robot->dof()).floatsPerItem();
+            const std::uint32_t B = resolved_.maxBatchSize;
+            const auto S          = static_cast<std::uint32_t>(streams_.size());
+            const auto N          = static_cast<std::uint32_t>(n);
+            const std::uint32_t nb = (N + B - 1) / B;
+            DeviceBuffer input(std::size_t(N) * fpi * sizeof(float)), result(std::size_t(N) * sizeof(std::uint32_t));
+            input.upload(items.data(), input.size());
+            std::vector<DeviceBuffer> staging, hits;
+            for (std::uint32_t s = 0; s < S; ++s) {
+                staging.emplace_back(std::size_t(B) * fpi * sizeof(float));
+                hits.emplace_back(std::size_t(B) * sizeof(std::uint32_t));
+            }
+            // One executor per stream: ReferenceExecutor is single-threaded (its per-stream parameter buffers live in
+            // a growing vector, so concurrent first launches on new streams would invalidate each other's buffer).
+            while (threadExecs_.size() < S) {
+                threadExecs_.push_back(
+                    std::make_unique<internal::ReferenceExecutor>(env().ctx, backend_->programs(), resolved_.optix));
+            }
+            backend_->beginCheck(CheckInfo{N, nb});
+            std::vector<std::exception_ptr> errors(S);
+            std::vector<std::thread> workers;
+            for (std::uint32_t s = 0; s < S; ++s) {
+                workers.emplace_back([&, s] {
+                    try {
+                        env().ctx->makeCurrent();
+                        const StreamContext& sc = streams_[s];
+                        for (std::uint32_t b = s; b < nb; b += S) {
+                            const std::uint32_t first = b * B;
+                            const std::uint32_t cnt   = (std::min)(B, N - first);
+                            hits[s].memsetAsync(0, std::size_t(cnt) * 4, sc.stream);
+                            staging[s].copyFromAsync(input.ptr() + std::uint64_t(first) * fpi * sizeof(float),
+                                std::size_t(cnt) * fpi * sizeof(float), sc.stream);
+                            BatchView v;
+                            v.batchIndex          = b;
+                            v.firstItem           = first;
+                            v.itemCount           = cnt;
+                            v.items               = DeviceSpan<const float>{staging[s].ptr(), std::size_t(cnt) * fpi};
+                            v.hitCounts           = DeviceSpan<std::uint32_t>{hits[s].ptr(), cnt};
+                            const LaunchPlan plan = backend_->prepare(sc, v);
+                            threadExecs_[s]->launch(sc.stream, plan);
+                            result.copyFromAsync(hits[s].ptr(), std::size_t(cnt) * 4, sc.stream, std::size_t(first) * 4);
+                        }
+                    } catch (...) {
+                        errors[s] = std::current_exception();
+                    }
+                });
+            }
+            for (auto& w : workers) w.join();
+            for (const auto& sc : streams_) cudaStreamSynchronize(sc.stream);
+            for (auto& e : errors) {
+                if (e) std::rethrow_exception(e);
+            }
+            std::vector<std::uint32_t> counts(N);
+            result.download(counts.data(), counts.size() * 4);
+            return support::flagsFromCounts(counts);
+        }
         Backend& backend() { return *backend_; }
 
     private:
@@ -98,6 +162,7 @@ namespace {
         std::unique_ptr<Backend> backend_;
         std::unique_ptr<internal::ReferenceExecutor> exec_;
         std::unique_ptr<internal::ReferenceBatchRunner> runner_;
+        std::vector<std::unique_ptr<internal::ReferenceExecutor>> threadExecs_;
     };
 
     class CurveBackendTest : public ::testing::Test {
@@ -226,6 +291,22 @@ TEST_F(CurveBackendTest, ObbCullingGivesTheSameFlagsAsWithout) {
             EXPECT_EQ(diffCount(p, fOn, 517), 0u);
             const support::Flags again = hOn.run(env().inputs16, kItems);
             EXPECT_EQ(diffCount(again, fOn, kItems), 0u);
+        }
+    }
+}
+
+TEST_F(CurveBackendTest, ConcurrentPrepareFromOneThreadPerStreamGivesTheGoldenFlags) {
+    for (Mode m : {Mode::LinearCurve, Mode::QuadraticCurve}) {
+        for (bool obb : {false, true}) {
+            SCOPED_TRACE(std::string(m == Mode::LinearCurve ? "linear" : "quad") + (obb ? " obb" : ""));
+            const support::Flags& golden = m == Mode::LinearCurve ? env().goldenLinear : env().goldenQuad;
+            CheckerConfig cfg            = config(m);
+            cfg.obbCulling               = obb ? Toggle::On : Toggle::Off;
+            Harness h(cfg);
+            for (int rep = 0; rep < 3; ++rep) {
+                EXPECT_EQ(diffCount(h.runThreaded(env().inputs16, kItems), golden, kItems), 0u) << "rep " << rep;
+            }
+            EXPECT_EQ(diffCount(h.runThreaded(env().inputs16, 517), golden, 517), 0u);
         }
     }
 }
